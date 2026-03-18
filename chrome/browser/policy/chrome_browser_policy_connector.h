@@ -28,6 +28,7 @@ namespace policy {
 class ConfigurationPolicyProvider;
 class LocalTestPolicyProvider;
 class ProxyPolicyProvider;
+class HyConnectPolicyProvider;
 
 #if !BUILDFLAG(IS_CHROMEOS)
 class ChromeBrowserCloudManagementController;
@@ -110,8 +111,13 @@ class ChromeBrowserPolicyConnector : public BrowserPolicyConnector {
     return proxy_policy_provider_;
   }
 
+
   ConfigurationPolicyProvider* command_line_policy_provider() {
     return command_line_provider_;
+  }
+
+  HyConnectPolicyProvider* hyconnect_policy_provider() {
+    return hyconnect_policy_provider_;
   }
 
   // Set ProxyPolicyProvider for testing, caller needs to init and shutdown the
@@ -185,11 +191,16 @@ class ChromeBrowserPolicyConnector : public BrowserPolicyConnector {
   // Owned by base class.
   raw_ptr<ConfigurationPolicyProvider> platform_provider_ = nullptr;
 
+
   // Owned by base class.
   raw_ptr<ConfigurationPolicyProvider> command_line_provider_ = nullptr;
 
+  // Owned by base class.
+  raw_ptr<HyConnectPolicyProvider> hyconnect_policy_provider_ = nullptr;
+
   raw_ptr<ConfigurationPolicyProvider> local_test_provider_for_testing_ =
       nullptr;
+
   std::unique_ptr<LocalTestPolicyProvider> local_test_provider_;
 
   // Weak pointers needed for tasks that need to wait until it can be decided

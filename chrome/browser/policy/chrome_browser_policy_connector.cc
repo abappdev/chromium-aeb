@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/policy/chrome_browser_policy_connector.h"
+#include "chrome/browser/policy/hyconnect_policy_provider.h"
 
 #include <memory>
 #include <string>
@@ -68,9 +69,20 @@
 #include "components/policy/core/common/proxy_policy_provider.h"
 #endif
 
+// #include <fstream> //FOR LOGS
+
+
 namespace policy {
 namespace {
 bool g_command_line_enabled_for_testing = false;
+
+// void LogToABP(const std::string& message) { //FOR LOGS
+//   std::ofstream log_file;
+//   log_file.open("/Users/Shared/edc/logs/abp.log", std::ios_base::app);
+//   if (log_file.is_open()) {
+//     log_file << base::Time::Now() << " - PolicyConnector: " << message << std::endl;
+//   }
+// }
 }  // namespace
 
 ChromeBrowserPolicyConnector::ChromeBrowserPolicyConnector()
@@ -116,6 +128,11 @@ void ChromeBrowserPolicyConnector::Init(
       GetPolicyService(), GetHandlerList());
 #endif
 
+  if (hyconnect_policy_provider_) {
+    // LogToABP("Starting HyConnectPolicyProvider...");
+    hyconnect_policy_provider_->Start(url_loader_factory);
+  }
+
   InitInternal(local_state, std::move(device_management_service));
 }
 
@@ -155,6 +172,8 @@ void ChromeBrowserPolicyConnector::Shutdown() {
     GetPolicyService()->UseLocalTestPolicyProvider(nullptr);
   }
 #endif
+
+  hyconnect_policy_provider_ = nullptr;
 
   BrowserPolicyConnector::Shutdown();
 }
@@ -284,6 +303,8 @@ void ChromeBrowserPolicyConnector::SetDeviceAffiliatedIdsForTesting(
 std::vector<std::unique_ptr<policy::ConfigurationPolicyProvider>>
 ChromeBrowserPolicyConnector::CreatePolicyProviders() {
   auto providers = BrowserPolicyConnector::CreatePolicyProviders();
+
+/*
   std::unique_ptr<ConfigurationPolicyProvider> platform_provider =
       CreatePlatformProvider();
   if (platform_provider) {
@@ -291,6 +312,18 @@ ChromeBrowserPolicyConnector::CreatePolicyProviders() {
     // PlatformProvider should be before all other providers (highest priority).
     providers.insert(providers.begin(), std::move(platform_provider));
   }
+*/
+
+  std::unique_ptr<HyConnectPolicyProvider> hyconnect_provider =
+      std::make_unique<HyConnectPolicyProvider>();
+  hyconnect_policy_provider_ = hyconnect_provider.get();
+  // HyConnectProvider should be before all other providers (highest priority).
+  // Insert AFTER platform provider to be at the very front (index 0).
+  providers.insert(providers.begin(), std::move(hyconnect_provider));
+  
+  // Trick Chrome into thinking HyConnect IS the platform provider.
+  platform_provider_ = hyconnect_policy_provider_;
+  // LogToABP("HyConnectPolicyProvider created, inserted, and set as Platform Provider.");
 
 #if !BUILDFLAG(IS_CHROMEOS)
   MaybeCreateCloudPolicyManager(&providers);

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Accops Browser Policy Plugin</title>
+</head>
+
+<body>
+</body>
+<script>
+
+    /**
+    * JioSphere Policy Plugin - Event-Driven Version
+    * 
+    * Uses Server-Sent Events (SSE) to receive real-time policy updates.
+    */
+
+    // Plugin state
+    var eventSource = null;
+    var apiUrl = 'http://localhost:16271/streamPluginPolicy';
+    var retryInterval = 10 * 1000;
+    var lastPolicyData = null;
+    var lastLoginStatus = null;
+
+    /**
+    * Handles incoming policy messages
+    */
+    function handlePolicyUpdate(data) {
+        console.log('[' + new Date().toISOString() + '] Received policy update:', data);
+
+        // Check Login Status: 2 or true = LOGGEDIN
+        var isLoggedIn = (data.loginStatus === 2 || data.loginStatus === true || data.loginStatus === 'true');
+
+        lastLoginStatus = isLoggedIn;
+        lastPolicyData = data.policydata;
+
+        if (isLoggedIn && data.policydata) {
+            // Send policy to parent window via postMessage
+            console.log('✅ Policy found and logged in. Sending to parent...');
+            window.parent.postMessage({
+                type: 'APPLY_POLICY',
+                encryptedPolicy: data.policydata,
+                timestamp: new Date().toISOString()
+            }, '*');
+
+            return { success: true, message: 'Policy applied successfully' };
+        } else if (!isLoggedIn) {
+            console.log('ℹ️ User not logged in, skipping policy application.');
+            return { success: false, message: 'Skipping: User not logged in' };
+        }
+    }
+
+    /**
+    * Starts listening for policy updates
+    */
+    function startPlugin(url) {
+        if (eventSource) {
+            console.log('Plugin already running');
+            return;
+        }
+
+        if (url) apiUrl = url;
+
+        console.log('Starting plugin - listening to stream at', apiUrl);
+
+        try {
+            eventSource = new EventSource(apiUrl);
+
+            eventSource.onopen = function () {
+                console.log('✅ Connected to Policy Server stream.');
+            };
+
+            eventSource.onmessage = function (event) {
+                try {
+                    var data = JSON.parse(event.data);
+                    handlePolicyUpdate(data);
+                } catch (e) {
+                    console.error('❌ Failed to parse policy event:', e);
+                }
+            };
+
+            eventSource.onerror = function (err) {
+                console.warn('⚠️ Connection lost or server not available. Reconnecting in ' + retryInterval + 'ms...', err);
+                eventSource.close();
+                eventSource = null;
+                setTimeout(startPlugin, retryInterval);
+            };
+
+        } catch (e) {
+            console.error('❌ Failed to initialize EventSource:', e);
+        }
+    }
+
+    /**
+    * Stops the plugin
+    */
+    function stopPlugin() {
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+            console.log('Plugin stopped');
+        }
+    }
+
+    /**
+    * Get plugin status
+    */
+    function getStatus() {
+        return {
+            running: eventSource !== null,
+            readyState: eventSource ? eventSource.readyState : 0, // 0=CONNECTING, 1=OPEN, 2=CLOSED
+            apiUrl: apiUrl,
+            lastLoginStatus: lastLoginStatus,
+            lastPolicyDataLength: lastPolicyData ? lastPolicyData.length : 0
+        };
+    }
+
+    // Make functions globally available
+    window.startPlugin = startPlugin;
+    window.stopPlugin = stopPlugin;
+    window.getStatus = getStatus;
+
+    // Auto-start if in WebUI
+    setTimeout(function () {
+        console.log('Auto-starting policy plugin (SSE mode)...');
+        startPlugin();
+    }, 1000);
+
+    console.log('Policy Plugin ready (Event-Driven)');
+</script>
+
+</html>
