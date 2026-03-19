@@ -1,0 +1,33 @@
+Name: Noise-C
+Short Name: noise-c
+URL: https://github.com/rweather/noise-c
+Version: N/A
+Date: 2023-12-07
+Revision: cfe25410979a87391bb9ac8d4d4bef64e9f268c6
+Update Mechanism: Manual
+License: MIT
+License File: COPYING
+Shipped: no
+Security Critical: yes
+CPEPrefix: unknown
+
+Description:
+Noise-C is a plain C implementation of the Noise Protocol Framework. Chromium
+vendors it here as a standalone third-party target for future browser-side
+localhost policy and transport integrations that require Noise handshakes.
+
+Local Modifications:
+None to upstream sources.
+
+Chromium integration files added:
+- BUILD.gn
+- DIR_METADATA
+- OWNERS
+- README.chromium
+
+Build-specific behavior:
+- The Chromium GN target currently builds the reference protocol, protobuf, and
+  key-loading libraries.
+- Curve25519, Ed25519, ChaChaPoly, AES-GCM, SHA-256, SHA-512, BLAKE2b, and
+  BLAKE2s are enabled.
+- Curve448 and NewHope are not wired into the Chromium target yet.

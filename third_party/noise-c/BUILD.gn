@@ -1,0 +1,165 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+config("noise_c_public_config") {
+  include_dirs = [ "include" ]
+}
+
+config("noise_c_internal_config") {
+  cflags_c = [ "-Wno-expansion-to-defined" ]
+  include_dirs = [
+    "src",
+    "src/keys",
+    "src/protocol",
+    "include/noise/keys",
+  ]
+  defines = [
+    "ED25519_CUSTOMHASH",
+    "ED25519_CUSTOMRANDOM",
+  ]
+}
+
+group("noise_c") {
+  deps = [
+    ":noise_keys",
+    ":noise_protobufs",
+    ":noise_protocol",
+  ]
+}
+
+source_set("noise_protocol") {
+  public_configs = [ ":noise_c_public_config" ]
+
+  configs -= [ "//build/config/compiler:chromium_code" ]
+  configs += [
+    ":noise_c_internal_config",
+    "//build/config/compiler:no_chromium_code",
+  ]
+
+  public = [
+    "include/noise/protocol.h",
+    "include/noise/protocol/buffer.h",
+    "include/noise/protocol/cipherstate.h",
+    "include/noise/protocol/constants.h",
+    "include/noise/protocol/dhstate.h",
+    "include/noise/protocol/errors.h",
+    "include/noise/protocol/handshakestate.h",
+    "include/noise/protocol/hashstate.h",
+    "include/noise/protocol/names.h",
+    "include/noise/protocol/randstate.h",
+    "include/noise/protocol/signstate.h",
+    "include/noise/protocol/symmetricstate.h",
+    "include/noise/protocol/util.h",
+  ]
+
+  sources = [
+    "src/backend/ref/cipher-aesgcm.c",
+    "src/backend/ref/cipher-chachapoly.c",
+    "src/backend/ref/dh-curve25519.c",
+    "src/backend/ref/hash-blake2b.c",
+    "src/backend/ref/hash-blake2s.c",
+    "src/backend/ref/hash-sha256.c",
+    "src/backend/ref/hash-sha512.c",
+    "src/backend/ref/sign-ed25519.c",
+    "src/crypto/aes/rijndael-alg-fst.c",
+    "src/crypto/blake2/blake2-endian.h",
+    "src/crypto/blake2/blake2b.c",
+    "src/crypto/blake2/blake2b.h",
+    "src/crypto/blake2/blake2s.c",
+    "src/crypto/blake2/blake2s.h",
+    "src/crypto/chacha/chacha.c",
+    "src/crypto/chacha/chacha.h",
+    "src/crypto/donna/poly1305-donna-16.h",
+    "src/crypto/donna/poly1305-donna-32.h",
+    "src/crypto/donna/poly1305-donna-64.h",
+    "src/crypto/donna/poly1305-donna-8.h",
+    "src/crypto/donna/poly1305-donna.c",
+    "src/crypto/donna/poly1305-donna.h",
+    "src/crypto/ed25519/curve25519-donna-32bit.h",
+    "src/crypto/ed25519/curve25519-donna-64bit.h",
+    "src/crypto/ed25519/curve25519-donna-helpers.h",
+    "src/crypto/ed25519/curve25519-donna-sse2.h",
+    "src/crypto/ed25519/ed25519-donna-32bit-sse2.h",
+    "src/crypto/ed25519/ed25519-donna-32bit-tables.h",
+    "src/crypto/ed25519/ed25519-donna-64bit-sse2.h",
+    "src/crypto/ed25519/ed25519-donna-64bit-tables.h",
+    "src/crypto/ed25519/ed25519-donna-64bit-x86-32bit.h",
+    "src/crypto/ed25519/ed25519-donna-64bit-x86.h",
+    "src/crypto/ed25519/ed25519-donna-basepoint-table.h",
+    "src/crypto/ed25519/ed25519-donna-batchverify.h",
+    "src/crypto/ed25519/ed25519-donna-impl-base.h",
+    "src/crypto/ed25519/ed25519-donna-impl-sse2.h",
+    "src/crypto/ed25519/ed25519-donna-portable-identify.h",
+    "src/crypto/ed25519/ed25519-donna-portable.h",
+    "src/crypto/ed25519/ed25519-donna.h",
+    "src/crypto/ed25519/ed25519-hash-custom.h",
+    "src/crypto/ed25519/ed25519-hash.h",
+    "src/crypto/ed25519/ed25519-randombytes-custom.h",
+    "src/crypto/ed25519/ed25519-randombytes.h",
+    "src/crypto/ed25519/ed25519.c",
+    "src/crypto/ed25519/ed25519.h",
+    "src/crypto/ed25519/modm-donna-32bit.h",
+    "src/crypto/ed25519/modm-donna-64bit.h",
+    "src/crypto/ghash/ghash.c",
+    "src/crypto/ghash/ghash.h",
+    "src/crypto/sha2/sha256.c",
+    "src/crypto/sha2/sha256.h",
+    "src/crypto/sha2/sha512.c",
+    "src/crypto/sha2/sha512.h",
+    "src/protocol/cipherstate.c",
+    "src/protocol/dhstate.c",
+    "src/protocol/errors.c",
+    "src/protocol/handshakestate.c",
+    "src/protocol/hashstate.c",
+    "src/protocol/internal.c",
+    "src/protocol/internal.h",
+    "src/protocol/names.c",
+    "src/protocol/patterns.c",
+    "src/protocol/rand_os.c",
+    "src/protocol/randstate.c",
+    "src/protocol/signstate.c",
+    "src/protocol/symmetricstate.c",
+    "src/protocol/util.c",
+  ]
+}
+
+source_set("noise_protobufs") {
+  public_configs = [ ":noise_c_public_config" ]
+
+  configs -= [ "//build/config/compiler:chromium_code" ]
+  configs += [
+    ":noise_c_internal_config",
+    "//build/config/compiler:no_chromium_code",
+  ]
+
+  public = [ "include/noise/protobufs.h" ]
+
+  sources = [ "src/protobufs/protobufs.c" ]
+}
+
+source_set("noise_keys") {
+  public_configs = [ ":noise_c_public_config" ]
+
+  configs -= [ "//build/config/compiler:chromium_code" ]
+  configs += [
+    ":noise_c_internal_config",
+    "//build/config/compiler:no_chromium_code",
+  ]
+
+  public = [
+    "include/noise/keys.h",
+    "include/noise/keys/certificate.h",
+    "include/noise/keys/loader.h",
+  ]
+
+  sources = [
+    "src/keys/certificate.c",
+    "src/keys/loader.c",
+  ]
+
+  deps = [
+    ":noise_protobufs",
+    ":noise_protocol",
+  ]
+}
