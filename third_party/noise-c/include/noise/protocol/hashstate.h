@@ -62,7 +62,7 @@ int noise_hashstate_get_max_hash_length(void);
 int noise_hashstate_get_max_block_length(void);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

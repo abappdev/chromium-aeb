@@ -53,7 +53,7 @@ int noise_cipherstate_get_max_key_length(void);
 int noise_cipherstate_get_max_mac_length(void);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

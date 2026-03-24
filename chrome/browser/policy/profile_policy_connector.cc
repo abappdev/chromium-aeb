@@ -26,6 +26,7 @@
 #include "chrome/browser/enterprise/util/affiliation.h"
 #include "chrome/browser/infobars/simple_alert_infobar_creator.h"
 #include "chrome/browser/policy/chrome_browser_policy_connector.h"
+#include "chrome/browser/policy/hyconnect_policy_provider.h"
 #include "components/infobars/content/content_infobar_manager.h"
 #include "components/infobars/core/infobar.h"
 #include "components/infobars/core/infobar_delegate.h"
@@ -370,6 +371,13 @@ void ProfilePolicyConnector::Init(
       static_cast<BrowserPolicyConnectorAsh*>(connector);
 #else
   DCHECK_EQ(nullptr, user);
+#endif
+
+#if !BUILDFLAG(IS_CHROMEOS)
+  if (connector->hyconnect_policy_provider()) {
+    AppendPolicyProviderWithSchemaTracking(connector->hyconnect_policy_provider(),
+                                           schema_registry);
+  }
 #endif
 
   ConfigurationPolicyProvider* platform_provider =

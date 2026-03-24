@@ -21,7 +21,7 @@ config("noise_c_internal_config") {
 }
 
 group("noise_c") {
-  deps = [
+  public_deps = [
     ":noise_keys",
     ":noise_protobufs",
     ":noise_protocol",
@@ -38,6 +38,7 @@ source_set("noise_protocol") {
   ]
 
   public = [
+    "include/noise.h",
     "include/noise/protocol.h",
     "include/noise/protocol/buffer.h",
     "include/noise/protocol/cipherstate.h",
@@ -51,6 +52,7 @@ source_set("noise_protocol") {
     "include/noise/protocol/signstate.h",
     "include/noise/protocol/symmetricstate.h",
     "include/noise/protocol/util.h",
+    "include/noise_protocol.h",
   ]
 
   sources = [

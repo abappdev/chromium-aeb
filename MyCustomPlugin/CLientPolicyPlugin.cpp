@@ -8,10 +8,82 @@
 #include <QHostAddress>
 #include <QList>
 #include <QHash>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QTimer>
 #include <QtGlobal>
+#include <QByteArray>
 #include "PLog.h"
 #include "CommonUIHandler.h"
+#include "NoiseSession.h"
+
+namespace
+{
+const char kNoiseHandshakeHeader[] = "X-Noise-Handshake";
+const char kServerStaticPrivateKeyHex[] =
+    "0891788b41a01205a25bcbbea3b735e30077a3715d6f5da50cf0974e91de9a7f";
+
+// truncateForLog removed for security / preventing sensitive data in logs
+
+bool normalizePolicyForWire(const QString &policy,
+                            QByteArray &policyDataB64,
+                            QByteArray &normalizedPolicyJson,
+                            QByteArray &parseMode)
+{
+    const QByteArray trimmed = policy.trimmed().toUtf8();
+    if (trimmed.isEmpty())
+    {
+        normalizedPolicyJson = "{}";
+        policyDataB64 = normalizedPolicyJson.toBase64();
+        parseMode = "empty->json";
+        return true;
+    }
+
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(trimmed, &error);
+    if (error.error == QJsonParseError::NoError && !doc.isNull())
+    {
+        normalizedPolicyJson = doc.toJson(QJsonDocument::Compact);
+        policyDataB64 = normalizedPolicyJson.toBase64();
+        parseMode = "raw-json";
+        return true;
+    }
+
+    const QByteArray decoded = QByteArray::fromBase64(trimmed);
+    QJsonParseError decodedError;
+    QJsonDocument decodedDoc = QJsonDocument::fromJson(decoded, &decodedError);
+    if (decodedError.error == QJsonParseError::NoError && !decodedDoc.isNull())
+    {
+        normalizedPolicyJson = decodedDoc.toJson(QJsonDocument::Compact);
+        policyDataB64 = normalizedPolicyJson.toBase64();
+        parseMode = "base64-json";
+        return true;
+    }
+
+    normalizedPolicyJson = trimmed;
+    policyDataB64 = normalizedPolicyJson.toBase64();
+    parseMode = "raw-unknown";
+    return false;
+}
+
+QString extractHeaderValue(const QStringList &lines, const QString &headerName)
+{
+    const QString prefix = headerName + ":";
+    foreach (const QString &line, lines)
+    {
+        if (line.startsWith(prefix, Qt::CaseInsensitive))
+            return line.mid(prefix.length()).trimmed();
+    }
+
+    return QString();
+}
+
+bool loadServerStaticPrivateKey(QByteArray &privateKey)
+{
+    privateKey = QByteArray::fromHex(kServerStaticPrivateKeyHex);
+    return privateKey.size() == 32;
+}
+}
 
 class AccopsBrowserPolicyServer : public QTcpServer
 {
@@ -35,7 +107,7 @@ public:
             return true;
         }
 
-        if (!listen(QHostAddress::AnyIPv4, port))
+        if (!listen(QHostAddress::LocalHost, port))
         {
             PLog::Instance()->Log(TERROR, MODABPSERVER,
                                   "PolicyServer listen failed: %s",
@@ -46,6 +118,12 @@ public:
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
                               "PolicyServer started on port %d", port);
         m_running = true;
+
+        m_lastLoginState = !CCachedStore::GetClientIsLoggedOut();
+        m_lastPolicy = CCachedStore::GetJiospherePolicy();
+        PLog::Instance()->Log(TDEBUG, MODABPSERVER,
+                              "PolicyServer primed state on start: Login=%d, PolicyLen=%d",
+                              m_lastLoginState, m_lastPolicy.length());
 
         // Start checking for updates every 500ms
         m_updateTimer->start(500);
@@ -75,6 +153,11 @@ public:
         m_clients.clear();
         m_subscribers.clear();
         m_requestBuffer.clear();
+        foreach (NoiseSession *session, m_sessions)
+        {
+            delete session;
+        }
+        m_sessions.clear();
         m_updateTimer->stop();
         m_running = false;
 
@@ -144,6 +227,7 @@ private slots:
         m_clients.removeAll(socket);
         m_subscribers.removeAll(socket);
         m_requestBuffer.remove(socket);
+        delete m_sessions.take(socket);
 
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
                               "Client disconnected");
@@ -171,7 +255,7 @@ private slots:
         m_lastPolicy = currentPolicy;
 
         // Broadcast to all subscribers
-        broadcastUpdate(currentLoginState, currentPolicy);
+        broadcastUpdate(currentLoginState, currentPolicy, "timer-change");
     }
 
 private:
@@ -179,7 +263,8 @@ private:
         : QTcpServer(parent),
           m_running(false),
           m_updateTimer(new QTimer(this)),
-          m_lastLoginState(false)
+          m_lastLoginState(false),
+          m_streamEventCounter(0)
     {
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
                               "PolicyServer instance created");
@@ -202,6 +287,8 @@ private:
 
         QString method = first.at(0);
         QString path = first.at(1);
+        const QString clientHandshakeB64 =
+            extractHeaderValue(lines, QString::fromLatin1(kNoiseHandshakeHeader));
 
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
                               "HTTP %s %s",
@@ -212,7 +299,55 @@ private:
 
         if (method == "GET" && (path == "/streamPluginPolicy" || path == "/ClientStatus"))
         {
+            QByteArray serverStaticPrivateKey;
+            QByteArray clientHandshake;
+            QByteArray serverHandshake;
+            NoiseSession *session = 0;
+
+            if (clientHandshakeB64.isEmpty() ||
+                !loadServerStaticPrivateKey(serverStaticPrivateKey) ||
+                (clientHandshake = QByteArray::fromBase64(clientHandshakeB64.toLatin1())).isEmpty())
+            {
+                PLog::Instance()->Log(TERROR, MODABPSERVER,
+                                      "Noise handshake rejected: missing/invalid client handshake");
+                body =
+                    "{"
+                    "\"status\":\"error\","
+                    "\"message\":\"Noise handshake required\""
+                    "}";
+                socket->write(buildResponse(body, 400, "Bad Request"));
+                socket->disconnectFromHost();
+                return;
+            }
+
+            session = new NoiseSession();
+            if (!session->InitializeResponder(serverStaticPrivateKey) ||
+                !session->ReadHandshakeMessage(clientHandshake) ||
+                !session->WriteHandshakeMessage(serverHandshake) ||
+                !session->isReady())
+            {
+                serverStaticPrivateKey.fill('\0'); // Clear private key on failure
+                PLog::Instance()->Log(TERROR, MODABPSERVER,
+                                      "Noise handshake failed: clientHandshakeBytes=%d",
+                                      clientHandshake.size());
+                delete session;
+                body =
+                    "{"
+                    "\"status\":\"error\","
+                    "\"message\":\"Noise handshake failed\""
+                    "}";
+                socket->write(buildResponse(body, 400, "Bad Request"));
+                socket->disconnectFromHost();
+                return;
+            }
+            
+            // Clear the private key from memory ASAP after successful initialization
+            serverStaticPrivateKey.fill('\0');
+
             PLog::Instance()->Log(TDEBUG, MODABPSERVER, "Client subscribed to policy stream");
+            PLog::Instance()->Log(TDEBUG, MODABPSERVER,
+                                  "Noise handshake accepted: clientHandshakeBytes=%d serverHandshakeBytes=%d",
+                                  clientHandshake.size(), serverHandshake.size());
 
             // 1. Send SSE Headers
             QByteArray headers;
@@ -223,6 +358,10 @@ private:
             headers.append("Access-Control-Allow-Origin: *\r\n");
             headers.append("Access-Control-Allow-Methods: GET\r\n");
             headers.append("Access-Control-Allow-Headers: Content-Type\r\n");
+            headers.append(kNoiseHandshakeHeader);
+            headers.append(": ");
+            headers.append(serverHandshake.toBase64());
+            headers.append("\r\n");
             headers.append("X-Accel-Buffering: no\r\n");
             headers.append("\r\n");
 
@@ -231,6 +370,7 @@ private:
 
             // 2. Add to subscribers list for future updates
             m_subscribers.append(socket);
+            m_sessions.insert(socket, session);
 
             // 3. Send IMMEDIATE current state (Bootstrap)
             bool isLoggedOut = CCachedStore::GetClientIsLoggedOut();
@@ -240,7 +380,7 @@ private:
             m_lastLoginState = !isLoggedOut;
             m_lastPolicy = policy;
 
-            sendSSEEvent(socket, !isLoggedOut, policy);
+            sendSSEEvent(socket, !isLoggedOut, policy, "bootstrap");
 
             // DO NOT CLOSE SOCKET - It needs to stay open for the stream
             return;
@@ -259,13 +399,14 @@ private:
         socket->disconnectFromHost();
     }
 
-    void broadcastUpdate(bool isLoggedIn, const QString &policy)
+    void broadcastUpdate(bool isLoggedIn, const QString &policy, const char *source)
     {
         if (m_subscribers.isEmpty())
             return;
 
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
-                              "Broadcasting update to %d subscribers", m_subscribers.size());
+                              "Broadcasting update to %d subscribers, source=%s, login=%d",
+                              m_subscribers.size(), source, isLoggedIn);
 
         QMutableListIterator<QTcpSocket *> i(m_subscribers);
         while (i.hasNext())
@@ -273,7 +414,7 @@ private:
             QTcpSocket *socket = i.next();
             if (socket->state() == QAbstractSocket::ConnectedState)
             {
-                sendSSEEvent(socket, isLoggedIn, policy);
+                sendSSEEvent(socket, isLoggedIn, policy, source);
             }
             else
             {
@@ -282,32 +423,69 @@ private:
         }
     }
 
-    void sendSSEEvent(QTcpSocket *socket, bool isLoggedIn, const QString &policy)
+    void sendSSEEvent(QTcpSocket *socket,
+                      bool isLoggedIn,
+                      const QString &policy,
+                      const char *source)
     {
+        NoiseSession *session = m_sessions.value(socket, 0);
+        if (!session || !session->isReady())
+            return;
+
         QByteArray policyData;
-        if (!isLoggedIn || policy.isEmpty())
+        QByteArray normalizedPolicyJson;
+        QByteArray parseMode;
+        bool normalized = false;
+        if (!isLoggedIn)
         {
-            policyData = "e30="; // {} base64
+            normalizedPolicyJson = "{}";
+            policyData = normalizedPolicyJson.toBase64();
+            parseMode = "logged-out";
+            normalized = true;
         }
         else
         {
-            policyData = policy.toUtf8();
+            normalized = normalizePolicyForWire(policy, policyData,
+                                                normalizedPolicyJson, parseMode);
+        }
+
+        QByteArray innerJson;
+        innerJson.append("{");
+        innerJson.append("\"policydata\":\"");
+        innerJson.append(policyData);
+        innerJson.append("\",");
+        innerJson.append("\"loginStatus\":");
+        innerJson.append(isLoggedIn ? "true" : "false");
+        innerJson.append("}");
+
+        QByteArray encryptedPayload;
+        if (!session->Encrypt(innerJson, encryptedPayload))
+        {
+            PLog::Instance()->Log(TERROR, MODABPSERVER,
+                                  "STREAM send failed: source=%s encrypt failed", source);
+            return;
         }
 
         QByteArray body;
         body.append("{");
-        body.append("\"status\":\"success\",");
-        body.append("\"policydata\":\"");
-        body.append(policyData);
-        body.append("\",");
-        body.append("\"loginStatus\":");
-        body.append(isLoggedIn ? "true" : "false");
-        body.append("}");
+        body.append("\"awcData\":\"");
+        body.append(encryptedPayload.toBase64());
+        body.append("\"}");
 
         QByteArray payload;
         payload.append("data: ");
         payload.append(body);
         payload.append("\n\n"); // SSE Event Terminator
+
+        ++m_streamEventCounter;
+        PLog::Instance()->Log(TDEBUG, MODABPSERVER,
+                              "STREAM event=%llu source=%s login=%d normalized=%d parseMode=%s",
+                              static_cast<unsigned long long>(m_streamEventCounter),
+                              source, isLoggedIn, normalized, parseMode.constData());
+
+        // Securely clear sensitive buffers before they are deallocated
+        normalizedPolicyJson.fill('\0');
+        innerJson.fill('\0');
 
         socket->write(payload);
         socket->flush();
@@ -339,7 +517,9 @@ private:
     QTimer *m_updateTimer;
     QString m_lastPolicy;
     bool m_lastLoginState;
+    quint64 m_streamEventCounter;
     QHash<QTcpSocket *, QByteArray> m_requestBuffer;
+    QHash<QTcpSocket *, NoiseSession *> m_sessions;
 };
 
 #endif // ACCOPSBROWSERPOLICYSERVER_H

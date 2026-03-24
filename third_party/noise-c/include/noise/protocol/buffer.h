@@ -48,7 +48,7 @@ typedef struct
     ((buffer).data = (ptr), (buffer).size = (len), (buffer).max_size = (max))
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

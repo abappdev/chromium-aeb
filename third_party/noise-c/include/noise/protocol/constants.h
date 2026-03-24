@@ -157,7 +157,7 @@ extern "C" {
 #define NOISE_MAX_FINGERPRINT_LEN       256
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

@@ -69,7 +69,7 @@ int noise_signstate_get_max_key_length(void);
 int noise_signstate_get_max_signature_length(void);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

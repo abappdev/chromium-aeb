@@ -8,45 +8,54 @@
 set -e
 
 OUT_DIR="out/Default"
+OUT_DIR_REL_X64="out/Release-x64"
 TARGET="chrome"
 BIN_NAME="Chromium"
 
 print_usage() {
     cat <<EOF
-Usage: $0 [compile|run|both]
+Usage: $0 [compile|run|both|release-x64]
 
 Commands:
-  compile   Build Chromium using autoninja
-  run       Run already-built Chromium
-  both      Compile and then run
+  compile      Build Chromium using autoninja (Default)
+  run          Run already-built Chromium (Default)
+  both         Compile and then run (Default)
+  release-x64  Generate and Build Release x64 (Intel Mac)
 
 If no argument is provided, an interactive menu is shown.
 EOF
 }
 
 compile_chrome() {
-    echo "[INFO] Compiling Chromium in $OUT_DIR"
+    local out=$1
+    echo "[INFO] Compiling Chromium in $out"
     if ! command -v autoninja >/dev/null 2>&1; then
         echo "[ERROR] autoninja not found in PATH"
         exit 1
     fi
 
-    autoninja -C "$OUT_DIR" "$TARGET"
+    autoninja -C "$out" "$TARGET"
+}
+
+gen_release_x64() {
+    echo "[INFO] Generating Release x64 configuration in $OUT_DIR_REL_X64"
+    gn gen "$OUT_DIR_REL_X64" --args='is_debug=false target_cpu="x64" symbol_level=0'
 }
 
 resolve_app_path() {
-    if [ -d "$OUT_DIR/Chromium.app" ]; then
-        echo "$OUT_DIR/Chromium.app/Contents/MacOS/$BIN_NAME"
+    local out=$1
+    if [ -d "$out/Chromium.app" ]; then
+        echo "$out/Chromium.app/Contents/MacOS/$BIN_NAME"
         return
     fi
 
-    if [ -d "$OUT_DIR/Google Chrome.app" ]; then
-        echo "$OUT_DIR/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if [ -d "$out/Google Chrome.app" ]; then
+        echo "$out/Google Chrome.app/Contents/MacOS/Google Chrome"
         return
     fi
 
-    if [ -x "$OUT_DIR/$TARGET" ]; then
-        echo "$OUT_DIR/$TARGET"
+    if [ -x "$out/$TARGET" ]; then
+        echo "$out/$TARGET"
         return
     fi
 
@@ -54,11 +63,12 @@ resolve_app_path() {
 }
 
 run_chrome() {
-    echo "[INFO] Running Chromium"
+    local out=$1
+    echo "[INFO] Running Chromium from $out"
 
-    BIN_PATH=$(resolve_app_path)
+    BIN_PATH=$(resolve_app_path "$out")
     if [ -z "$BIN_PATH" ]; then
-        echo "[ERROR] Chromium executable not found in $OUT_DIR"
+        echo "[ERROR] Chromium executable not found in $out"
         exit 1
     fi
 
@@ -67,26 +77,31 @@ run_chrome() {
     "$BIN_PATH" \
         --enable-logging=stderr \
         --v=0 \
-        "$@" &
+        "${@:2}" #&
 }
 
 interactive_menu() {
     echo "Select an option:"
-    echo "1. Compile"
-    echo "2. Run"
-    echo "3. Compile and Run"
-    read -r -p "Enter choice [1-3]: " choice
+    echo "1. Compile (Default)"
+    echo "2. Run (Default)"
+    echo "3. Compile and Run (Default)"
+    echo "4. Build Release x64 (Intel Mac)"
+    read -r -p "Enter choice [1-4]: " choice
 
     case "$choice" in
         1)
-            compile_chrome
+            compile_chrome "$OUT_DIR"
             ;;
         2)
-            run_chrome
+            run_chrome "$OUT_DIR"
             ;;
         3)
-            compile_chrome
-            run_chrome
+            compile_chrome "$OUT_DIR"
+            run_chrome "$OUT_DIR"
+            ;;
+        4)
+            gen_release_x64
+            compile_chrome "$OUT_DIR_REL_X64"
             ;;
         *)
             echo "Invalid option"
@@ -103,17 +118,19 @@ if [ "$#" -eq 0 ]; then
 fi
 
 case "$1" in
-    1)
-        compile_chrome
+    1|compile)
+        compile_chrome "$OUT_DIR"
         ;;
-    2)
-        shift
-        run_chrome "$@"
+    2|run)
+        run_chrome "$OUT_DIR" "$@"
         ;;
-    3)
-        shift
-        compile_chrome
-        run_chrome "$@"
+    3|both)
+        compile_chrome "$OUT_DIR"
+        run_chrome "$OUT_DIR" "$@"
+        ;;
+    4|release-x64)
+        gen_release_x64
+        compile_chrome "$OUT_DIR_REL_X64"
         ;;
     -h|--help)
         print_usage

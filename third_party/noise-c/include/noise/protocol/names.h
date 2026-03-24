@@ -51,7 +51,7 @@ int noise_protocol_id_to_name
     (char *name, size_t name_len, const NoiseProtocolId *id);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

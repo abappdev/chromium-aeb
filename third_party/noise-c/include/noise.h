@@ -1,0 +1,6 @@
+#ifndef THIRD_PARTY_NOISE_C_INCLUDE_NOISE_H_
+#define THIRD_PARTY_NOISE_C_INCLUDE_NOISE_H_
+
+#include <noise/protocol.h>
+
+#endif  // THIRD_PARTY_NOISE_C_INCLUDE_NOISE_H_

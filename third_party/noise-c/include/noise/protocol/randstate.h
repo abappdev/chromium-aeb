@@ -43,7 +43,7 @@ int noise_randstate_pad
 int noise_randstate_generate_simple(uint8_t *buffer, size_t len);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

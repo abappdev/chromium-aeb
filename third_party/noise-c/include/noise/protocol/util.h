@@ -46,7 +46,7 @@ int noise_format_fingerprint
      const uint8_t *public_key, size_t public_key_len);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

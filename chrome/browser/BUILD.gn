@@ -1050,6 +1050,7 @@ static_library("browser") {
     "policy/messaging_layer/util/upload_response_parser.h",
     "policy/messaging_layer/util/user_dm_token_retriever.cc",
     "policy/messaging_layer/util/user_dm_token_retriever.h",
+    "policy/noise_session.h",
     "policy/policy_ui_utils.cc",
     "policy/policy_ui_utils.h",
     "policy/policy_value_and_status_aggregator.cc",
@@ -2021,6 +2022,7 @@ static_library("browser") {
     "//components/page_content_annotations/core",
     "//components/supervised_user/core/browser:device_parental_controls",
     "//components/supervised_user/core/browser:synthetic_field_trial_delegate",
+    "//third_party/noise-c:noise_c",
 
     # TODO(crbug.com/369436587): Remove this dependency when
     # c/b/policy/configuration_policy_handler_list_factory.cc gets modularized.

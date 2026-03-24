@@ -71,7 +71,7 @@ int noise_dhstate_get_role(const NoiseDHState *state);
 int noise_dhstate_set_role(NoiseDHState *state, int role);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

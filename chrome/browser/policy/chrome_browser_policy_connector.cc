@@ -3,27 +3,35 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/policy/chrome_browser_policy_connector.h"
-#include "chrome/browser/policy/hyconnect_policy_provider.h"
 
+#include <atomic>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <utility>
 
 #include "base/check_is_test.h"
 #include "base/command_line.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/location.h"
+#include "base/logging.h"
 #include "base/path_service.h"
 #include "base/task/thread_pool.h"
+#include "base/threading/thread_restrictions.h"
+#include "base/time/time.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
+#include "build/buildflag.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/enterprise/browser_management/management_service_factory.h"
 #include "chrome/browser/policy/configuration_policy_handler_list_factory.h"
 #include "chrome/browser/policy/device_management_service_configuration.h"
+#include "chrome/browser/policy/hyconnect_policy_provider.h"
 #include "chrome/common/channel_info.h"
 #include "chrome/common/chrome_paths.h"
-#include "chrome_browser_policy_connector.h"
 #include "components/policy/core/common/async_policy_provider.h"
 #include "components/policy/core/common/cloud/cloud_external_data_manager.h"
 #include "components/policy/core/common/cloud/cloud_policy_client_registration_helper.h"
@@ -69,20 +77,38 @@
 #include "components/policy/core/common/proxy_policy_provider.h"
 #endif
 
-// #include <fstream> //FOR LOGS
-
-
 namespace policy {
 namespace {
-bool g_command_line_enabled_for_testing = false;
+static std::atomic<bool> g_accops_app_exists{false};
+static std::atomic<bool> g_accops_app_checked{false};
 
-// void LogToABP(const std::string& message) { //FOR LOGS
-//   std::ofstream log_file;
-//   log_file.open("/Users/Shared/edc/logs/abp.log", std::ios_base::app);
-//   if (log_file.is_open()) {
-//     log_file << base::Time::Now() << " - PolicyConnector: " << message << std::endl;
-//   }
-// }
+void CheckAccopsAppExistsBackground() {
+  g_accops_app_exists = base::PathExists(base::FilePath(kAccopsWorkspaceAppPath));
+  g_accops_app_checked = true;
+}
+
+void LogToABP(const std::string& message) {
+  if (!g_accops_app_checked) {
+    static bool check_posted = false;
+    if (!check_posted) {
+      check_posted = true;
+      base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT}, base::BindOnce(&CheckAccopsAppExistsBackground));
+    }
+    return;
+  }
+  if (!g_accops_app_exists) {
+    return;
+  }
+  LOG(WARNING) << "HyConnect Connector: " << message;
+  std::ofstream log_file;
+  log_file.open(kHyConnectLogFilePath, std::ios_base::app);
+  if (log_file.is_open()) {
+    log_file << base::Time::Now() << " - PolicyConnector: " << message << std::endl;
+    log_file.flush();
+  }
+}
+
+bool g_command_line_enabled_for_testing = false;
 }  // namespace
 
 ChromeBrowserPolicyConnector::ChromeBrowserPolicyConnector()
@@ -128,12 +154,14 @@ void ChromeBrowserPolicyConnector::Init(
       GetPolicyService(), GetHandlerList());
 #endif
 
-  if (hyconnect_policy_provider_) {
-    // LogToABP("Starting HyConnectPolicyProvider...");
-    hyconnect_policy_provider_->Start(url_loader_factory);
-  }
-
   InitInternal(local_state, std::move(device_management_service));
+
+  if (hyconnect_policy_provider_) {
+    LogToABP("Starting HyConnectPolicyProvider after policy service init");
+    hyconnect_policy_provider_->Start(url_loader_factory);
+  } else {
+    LogToABP("HyConnectPolicyProvider was not created during Init");
+  }
 }
 
 void ChromeBrowserPolicyConnector::OnBrowserStarted() {}
@@ -304,26 +332,20 @@ std::vector<std::unique_ptr<policy::ConfigurationPolicyProvider>>
 ChromeBrowserPolicyConnector::CreatePolicyProviders() {
   auto providers = BrowserPolicyConnector::CreatePolicyProviders();
 
-/*
   std::unique_ptr<ConfigurationPolicyProvider> platform_provider =
       CreatePlatformProvider();
   if (platform_provider) {
     platform_provider_ = platform_provider.get();
-    // PlatformProvider should be before all other providers (highest priority).
+    // Keep Chromium's native platform provider intact.
     providers.insert(providers.begin(), std::move(platform_provider));
   }
-*/
 
   std::unique_ptr<HyConnectPolicyProvider> hyconnect_provider =
       std::make_unique<HyConnectPolicyProvider>();
   hyconnect_policy_provider_ = hyconnect_provider.get();
-  // HyConnectProvider should be before all other providers (highest priority).
-  // Insert AFTER platform provider to be at the very front (index 0).
+  // HyConnect stays separate and is inserted ahead of the native platform
+  // provider so it has the highest effective precedence.
   providers.insert(providers.begin(), std::move(hyconnect_provider));
-  
-  // Trick Chrome into thinking HyConnect IS the platform provider.
-  platform_provider_ = hyconnect_policy_provider_;
-  // LogToABP("HyConnectPolicyProvider created, inserted, and set as Platform Provider.");
 
 #if !BUILDFLAG(IS_CHROMEOS)
   MaybeCreateCloudPolicyManager(&providers);

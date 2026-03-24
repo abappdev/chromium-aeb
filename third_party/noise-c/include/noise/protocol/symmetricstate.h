@@ -52,7 +52,7 @@ int noise_symmetricstate_split
     (NoiseSymmetricState *state, NoiseCipherState **c1, NoiseCipherState **c2);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

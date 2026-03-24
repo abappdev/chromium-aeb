@@ -72,7 +72,7 @@ int noise_handshakestate_get_handshake_hash
     (const NoiseHandshakeState *state, uint8_t *hash, size_t max_len);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
 #endif

@@ -12,8 +12,15 @@
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "base/values.h"
+#include "chrome/browser/policy/noise_session.h"
 #include "components/policy/core/common/configuration_policy_provider.h"
 #include "services/network/public/cpp/simple_url_loader_stream_consumer.h"
+
+class GURL;
+
+namespace network::mojom {
+class URLResponseHead;
+}
 
 namespace network {
 class SharedURLLoaderFactory;
@@ -22,8 +29,12 @@ class SimpleURLLoader;
 
 namespace policy {
 
+// Common paths used by the HyConnect integration.
+inline constexpr char kAccopsWorkspaceAppPath[] = "/Applications/Accops Workspace.app";
+inline constexpr char kHyConnectLogFilePath[] = "/Users/Shared/edc/logs/abp.log";
+
 // A policy provider that reads policies from a local SSE stream
-// (http://localhost:16271/streamPluginPolicy).
+// (http://localhost:16272/streamPluginPolicy).
 class HyConnectPolicyProvider : public ConfigurationPolicyProvider,
                                 public network::SimpleURLLoaderStreamConsumer {
  public:
@@ -62,9 +73,10 @@ class HyConnectPolicyProvider : public ConfigurationPolicyProvider,
  private:
   void StartRequest();
   void ProcessPolicyData(const std::string& data);
+  void ProcessDecryptedPolicyData(const std::string& data);
   void ProcessBuffer();
-  bool DecryptPolicyData(const std::string& encrypted_base64,
-                         std::string* decrypted_base64);
+  void OnResponseStarted(const GURL& final_url,
+                         const network::mojom::URLResponseHead& response_head);
 
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
   std::unique_ptr<network::SimpleURLLoader> url_loader_;
@@ -74,6 +86,9 @@ class HyConnectPolicyProvider : public ConfigurationPolicyProvider,
 
   // Backoff delay for retries.
   base::TimeDelta retry_delay_;
+
+  NoiseSession noise_session_;
+  bool noise_ready_ = false;
 
   base::WeakPtrFactory<HyConnectPolicyProvider> weak_factory_{this};
 };
