@@ -79,33 +79,49 @@
 
 namespace policy {
 namespace {
-static std::atomic<bool> g_accops_app_exists{false};
-static std::atomic<bool> g_accops_app_checked{false};
+static std::atomic<bool> g_abp_log_dir_exists{false};
+static std::atomic<bool> g_abp_log_dir_checked{false};
 
-void CheckAccopsAppExistsBackground() {
-  g_accops_app_exists = base::PathExists(base::FilePath(kAccopsWorkspaceAppPath));
-  g_accops_app_checked = true;
+void CheckAbpLogDirExistsBackground() {
+  g_abp_log_dir_exists = base::PathExists(GetAbpLogFilePath().DirName());
+  g_abp_log_dir_checked = true;
+}
+
+void WriteHyConnectConnectorLogEntryToFile(const std::string& message) {
+  const base::FilePath edc_path = GetEdcPath();
+  if (!base::PathExists(edc_path)) {
+    return;
+  }
+
+  const base::FilePath log_path = GetAbpLogFilePath();
+  base::CreateDirectory(log_path.DirName());
+
+  std::ofstream log_file;
+  log_file.open(log_path.AsUTF8Unsafe(), std::ios_base::app);
+  if (log_file.is_open()) {
+    log_file << base::Time::Now() << " - PolicyConnector: " << message
+             << std::endl;
+    log_file.flush();
+  }
 }
 
 void LogToABP(const std::string& message) {
-  if (!g_accops_app_checked) {
+  if (!g_abp_log_dir_checked) {
     static bool check_posted = false;
     if (!check_posted) {
       check_posted = true;
-      base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT}, base::BindOnce(&CheckAccopsAppExistsBackground));
+      base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT}, base::BindOnce(&CheckAbpLogDirExistsBackground));
     }
     return;
   }
-  if (!g_accops_app_exists) {
+  if (!g_abp_log_dir_exists) {
     return;
   }
   LOG(WARNING) << "HyConnect Connector: " << message;
-  std::ofstream log_file;
-  log_file.open(kHyConnectLogFilePath, std::ios_base::app);
-  if (log_file.is_open()) {
-    log_file << base::Time::Now() << " - PolicyConnector: " << message << std::endl;
-    log_file.flush();
-  }
+  base::ThreadPool::PostTask(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+      base::BindOnce(&WriteHyConnectConnectorLogEntryToFile, message));
 }
 
 bool g_command_line_enabled_for_testing = false;

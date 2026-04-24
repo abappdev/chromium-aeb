@@ -13,15 +13,45 @@
 #include <QTimer>
 #include <QtGlobal>
 #include <QByteArray>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
 #include "PLog.h"
 #include "CommonUIHandler.h"
 #include "NoiseSession.h"
 
+#include <random>
+#include <QFile>
+#include <QDir>
+#include <QProcessEnvironment>
+#include <noise/protocol.h>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#ifndef MADV_DONTDUMP
+#define MADV_DONTDUMP 16 // Fallback
+#endif
+#endif
+
 namespace
 {
 const char kNoiseHandshakeHeader[] = "X-Noise-Handshake";
-const char kServerStaticPrivateKeyHex[] =
-    "0891788b41a01205a25bcbbea3b735e30077a3715d6f5da50cf0974e91de9a7f";
+
+QString publicKeyFilePath()
+{
+#ifdef Q_OS_MAC
+    return QString::fromLatin1("/Users/Shared/edc/sphere.pub");
+#elif defined(Q_OS_WIN)
+    QString localAppData = QProcessEnvironment::systemEnvironment().value(
+        QString::fromLatin1("LOCALAPPDATA"));
+    if (localAppData.isEmpty())
+        localAppData = QDir::homePath() + QString::fromLatin1("/AppData/Local");
+    return QDir::fromNativeSeparators(localAppData) +
+           QString::fromLatin1("/Accops/edc/softclient/sphere.pub");
+#else
+    return QDir::homePath() + QString::fromLatin1("/.edc/sphere.pub");
+#endif
+}
 
 // truncateForLog removed for security / preventing sensitive data in logs
 
@@ -77,12 +107,6 @@ QString extractHeaderValue(const QStringList &lines, const QString &headerName)
 
     return QString();
 }
-
-bool loadServerStaticPrivateKey(QByteArray &privateKey)
-{
-    privateKey = QByteArray::fromHex(kServerStaticPrivateKeyHex);
-    return privateKey.size() == 32;
-}
 }
 
 class AccopsBrowserPolicyServer : public QTcpServer
@@ -107,6 +131,45 @@ public:
             return true;
         }
 
+        // --- START DYNAMIC KEY GENERATION ---
+        m_serverStaticPrivateKey.resize(32);
+        void* privPtr = m_serverStaticPrivateKey.data();
+        size_t privSize = m_serverStaticPrivateKey.size();
+
+#ifdef Q_OS_WIN
+        VirtualLock(privPtr, privSize);
+#else
+        mlock(privPtr, privSize);
+        madvise(privPtr, privSize, MADV_DONTDUMP);
+#endif
+
+        std::random_device rd;
+        quint32* ptr = reinterpret_cast<quint32*>(m_serverStaticPrivateKey.data());
+        size_t num_words = m_serverStaticPrivateKey.size() / sizeof(quint32);
+        for (size_t i = 0; i < num_words; ++i) {
+            ptr[i] = rd();
+        }
+
+        NoiseDHState* dh = 0;
+        noise_dhstate_new_by_id(&dh, NOISE_DH_CURVE25519);
+        noise_dhstate_set_keypair_private(
+            dh, 
+            reinterpret_cast<const uint8_t*>(m_serverStaticPrivateKey.constData()), 
+            privSize
+        );
+
+        m_serverStaticPublicKey.fill(0);
+        m_serverStaticPublicKey.resize(32);
+        noise_dhstate_get_public_key(
+            dh,
+            reinterpret_cast<uint8_t*>(m_serverStaticPublicKey.data()),
+            32);
+        noise_dhstate_free(dh);
+
+        ensurePublicKeyFilePresent();
+        refreshPublicKeyWatcher();
+        // --- END DYNAMIC KEY GENERATION ---
+
         if (!listen(QHostAddress::LocalHost, port))
         {
             PLog::Instance()->Log(TERROR, MODABPSERVER,
@@ -122,8 +185,7 @@ public:
         m_lastLoginState = !CCachedStore::GetClientIsLoggedOut();
         m_lastPolicy = CCachedStore::GetJiospherePolicy();
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
-                              "PolicyServer primed state on start: Login=%d, PolicyLen=%d",
-                              m_lastLoginState, m_lastPolicy.length());
+                              "PolicyServer primed state on start");
 
         // Start checking for updates every 500ms
         m_updateTimer->start(500);
@@ -160,6 +222,22 @@ public:
         m_sessions.clear();
         m_updateTimer->stop();
         m_running = false;
+        m_keyFileWatcher->removePaths(m_keyFileWatcher->files());
+        m_keyFileWatcher->removePaths(m_keyFileWatcher->directories());
+
+        // Wipe private key
+        if (!m_serverStaticPrivateKey.isEmpty()) {
+#ifdef Q_OS_WIN
+            SecureZeroMemory(m_serverStaticPrivateKey.data(), m_serverStaticPrivateKey.size());
+            VirtualUnlock(m_serverStaticPrivateKey.data(), m_serverStaticPrivateKey.size());
+#else
+            memset(m_serverStaticPrivateKey.data(), 0, m_serverStaticPrivateKey.size());
+            __asm__ __volatile__ ("" : : "r"(m_serverStaticPrivateKey.data()) : "memory"); 
+            munlock(m_serverStaticPrivateKey.data(), m_serverStaticPrivateKey.size());
+#endif
+            m_serverStaticPrivateKey.clear();
+        }
+        m_serverStaticPublicKey.clear();
 
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
                               "PolicyServer stopped");
@@ -212,8 +290,7 @@ private slots:
         QByteArray request = m_requestBuffer.take(socket);
 
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
-                              "Full HTTP request received (%d bytes)",
-                              request.size());
+                              "Full HTTP request received");
 
         handleRequest(socket, QString::fromUtf8(request));
     }
@@ -237,6 +314,8 @@ private slots:
 
     void checkForUpdates()
     {
+        ensurePublicKeyFilePresent();
+
         bool currentLoginState = !CCachedStore::GetClientIsLoggedOut();
         QString currentPolicy = CCachedStore::GetJiospherePolicy();
 
@@ -247,8 +326,7 @@ private slots:
         }
 
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
-                              "State change detected: Login=%d, PolicyLen=%d",
-                              currentLoginState, currentPolicy.length());
+                              "State change detected");
 
         // Update cache
         m_lastLoginState = currentLoginState;
@@ -263,6 +341,7 @@ private:
         : QTcpServer(parent),
           m_running(false),
           m_updateTimer(new QTimer(this)),
+          m_keyFileWatcher(new QFileSystemWatcher(this)),
           m_lastLoginState(false),
           m_streamEventCounter(0)
     {
@@ -270,10 +349,83 @@ private:
                               "PolicyServer instance created");
 
         connect(m_updateTimer, SIGNAL(timeout()), this, SLOT(checkForUpdates()));
+        connect(m_keyFileWatcher, SIGNAL(fileChanged(QString)),
+                this, SLOT(onPublicKeyFileChanged(QString)));
+        connect(m_keyFileWatcher, SIGNAL(directoryChanged(QString)),
+                this, SLOT(onPublicKeyDirectoryChanged(QString)));
     }
 
     AccopsBrowserPolicyServer(const AccopsBrowserPolicyServer &);
     AccopsBrowserPolicyServer &operator=(const AccopsBrowserPolicyServer &);
+
+    void ensurePublicKeyFilePresent()
+    {
+        if (m_serverStaticPublicKey.isEmpty())
+            return;
+
+        const QString filePath = publicKeyFilePath();
+        QDir keyDir(QFileInfo(filePath).absolutePath());
+        if (!keyDir.exists())
+            keyDir.mkpath(".");
+
+        const QByteArray expectedContents = m_serverStaticPublicKey.toHex();
+        QFile pubFile(filePath);
+        bool needsRewrite = true;
+        if (pubFile.exists() && pubFile.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            needsRewrite = pubFile.readAll().trimmed() != expectedContents;
+            pubFile.close();
+        }
+
+        if (!needsRewrite)
+        {
+            refreshPublicKeyWatcher();
+            return;
+        }
+
+        if (pubFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+        {
+            pubFile.write(expectedContents);
+            pubFile.close();
+            PLog::Instance()->Log(TDEBUG, MODABPSERVER,
+                                  "Service Key ensured at %s",
+                                  filePath.toUtf8().constData());
+        }
+        else
+        {
+            PLog::Instance()->Log(TERROR, MODABPSERVER,
+                                  "Failed to write Service Key at %s",
+                                  filePath.toUtf8().constData());
+        }
+
+        refreshPublicKeyWatcher();
+    }
+
+    void refreshPublicKeyWatcher()
+    {
+        const QString filePath = publicKeyFilePath();
+        const QString dirPath = QFileInfo(filePath).absolutePath();
+
+        if (!m_keyFileWatcher->directories().contains(dirPath))
+            m_keyFileWatcher->addPath(dirPath);
+
+        if (QFileInfo::exists(filePath) &&
+            !m_keyFileWatcher->files().contains(filePath))
+        {
+            m_keyFileWatcher->addPath(filePath);
+        }
+    }
+
+private slots:
+    void onPublicKeyFileChanged(const QString &)
+    {
+        ensurePublicKeyFilePresent();
+    }
+
+    void onPublicKeyDirectoryChanged(const QString &)
+    {
+        ensurePublicKeyFilePresent();
+    }
 
     void handleRequest(QTcpSocket *socket, const QString &request)
     {
@@ -299,21 +451,20 @@ private:
 
         if (method == "GET" && (path == "/streamPluginPolicy" || path == "/ClientStatus"))
         {
-            QByteArray serverStaticPrivateKey;
             QByteArray clientHandshake;
             QByteArray serverHandshake;
             NoiseSession *session = 0;
 
             if (clientHandshakeB64.isEmpty() ||
-                !loadServerStaticPrivateKey(serverStaticPrivateKey) ||
+                m_serverStaticPrivateKey.isEmpty() ||
                 (clientHandshake = QByteArray::fromBase64(clientHandshakeB64.toLatin1())).isEmpty())
             {
                 PLog::Instance()->Log(TERROR, MODABPSERVER,
-                                      "Noise handshake rejected: missing/invalid client handshake");
+                                      "Connection rejected: missing required parameters");
                 body =
                     "{"
                     "\"status\":\"error\","
-                    "\"message\":\"Noise handshake required\""
+                    "\"message\":\"Secure connection required\""
                     "}";
                 socket->write(buildResponse(body, 400, "Bad Request"));
                 socket->disconnectFromHost();
@@ -321,33 +472,26 @@ private:
             }
 
             session = new NoiseSession();
-            if (!session->InitializeResponder(serverStaticPrivateKey) ||
+            if (!session->InitializeResponder(m_serverStaticPrivateKey) ||
                 !session->ReadHandshakeMessage(clientHandshake) ||
                 !session->WriteHandshakeMessage(serverHandshake) ||
                 !session->isReady())
             {
-                serverStaticPrivateKey.fill('\0'); // Clear private key on failure
                 PLog::Instance()->Log(TERROR, MODABPSERVER,
-                                      "Noise handshake failed: clientHandshakeBytes=%d",
-                                      clientHandshake.size());
+                                      "Connection rejected: validation failed");
                 delete session;
                 body =
                     "{"
                     "\"status\":\"error\","
-                    "\"message\":\"Noise handshake failed\""
+                    "\"message\":\"Secure connection failed\""
                     "}";
                 socket->write(buildResponse(body, 400, "Bad Request"));
                 socket->disconnectFromHost();
                 return;
             }
-            
-            // Clear the private key from memory ASAP after successful initialization
-            serverStaticPrivateKey.fill('\0');
 
             PLog::Instance()->Log(TDEBUG, MODABPSERVER, "Client subscribed to policy stream");
-            PLog::Instance()->Log(TDEBUG, MODABPSERVER,
-                                  "Noise handshake accepted: clientHandshakeBytes=%d serverHandshakeBytes=%d",
-                                  clientHandshake.size(), serverHandshake.size());
+            PLog::Instance()->Log(TDEBUG, MODABPSERVER, "Secure session established");
 
             // 1. Send SSE Headers
             QByteArray headers;
@@ -405,8 +549,7 @@ private:
             return;
 
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
-                              "Broadcasting update to %d subscribers, source=%s, login=%d",
-                              m_subscribers.size(), source, isLoggedIn);
+                              "Broadcasting update to subscribers");
 
         QMutableListIterator<QTcpSocket *> i(m_subscribers);
         while (i.hasNext())
@@ -462,7 +605,7 @@ private:
         if (!session->Encrypt(innerJson, encryptedPayload))
         {
             PLog::Instance()->Log(TERROR, MODABPSERVER,
-                                  "STREAM send failed: source=%s encrypt failed", source);
+                                  "Stream send failed: payload creation error");
             return;
         }
 
@@ -479,9 +622,7 @@ private:
 
         ++m_streamEventCounter;
         PLog::Instance()->Log(TDEBUG, MODABPSERVER,
-                              "STREAM event=%llu source=%s login=%d normalized=%d parseMode=%s",
-                              static_cast<unsigned long long>(m_streamEventCounter),
-                              source, isLoggedIn, normalized, parseMode.constData());
+                              "Stream event sent");
 
         // Securely clear sensitive buffers before they are deallocated
         normalizedPolicyJson.fill('\0');
@@ -515,11 +656,14 @@ private:
     QList<QTcpSocket *> m_clients;
     QList<QTcpSocket *> m_subscribers;
     QTimer *m_updateTimer;
+    QFileSystemWatcher *m_keyFileWatcher;
     QString m_lastPolicy;
     bool m_lastLoginState;
     quint64 m_streamEventCounter;
     QHash<QTcpSocket *, QByteArray> m_requestBuffer;
     QHash<QTcpSocket *, NoiseSession *> m_sessions;
+    QByteArray m_serverStaticPrivateKey;
+    QByteArray m_serverStaticPublicKey;
 };
 
 #endif // ACCOPSBROWSERPOLICYSERVER_H

@@ -5,9 +5,12 @@
 #include "chrome/browser/policy/hyconnect_policy_provider.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <fstream>
+#include <optional>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "base/base64.h"
@@ -36,47 +39,111 @@
 
 namespace policy {
 namespace {
-static std::atomic<bool> g_accops_app_exists{false};
-static std::atomic<bool> g_accops_app_checked{false};
+static std::atomic<bool> g_abp_log_dir_exists{false};
+static std::atomic<bool> g_abp_log_dir_checked{false};
+constexpr size_t kMaxLogFileReadBytes = 4 * 1024 * 1024;
+constexpr base::TimeDelta kLogRetention = base::Hours(48);
 
-void CheckAccopsAppExistsBackground() {
-  g_accops_app_exists = base::PathExists(base::FilePath(kAccopsWorkspaceAppPath));
-  g_accops_app_checked = true;
+void CheckAbpLogDirExistsBackground() {
+  g_abp_log_dir_exists = base::PathExists(GetAbpLogFilePath().DirName());
+  g_abp_log_dir_checked = true;
+}
+
+std::string BuildRetainedLogContent(const std::string& existing_content,
+                                    const std::string& new_entry,
+                                    int64_t cutoff_ms) {
+  std::stringstream input(existing_content);
+  std::string line;
+  std::string output;
+  while (std::getline(input, line)) {
+    if (line.empty()) {
+      continue;
+    }
+
+    const size_t separator = line.find('|');
+    if (separator == std::string::npos) {
+      continue;
+    }
+
+    int64_t timestamp_ms = 0;
+    if (!base::StringToInt64(line.substr(0, separator), &timestamp_ms) ||
+        timestamp_ms < cutoff_ms) {
+      continue;
+    }
+
+    output.append(line);
+    output.push_back('\n');
+  }
+
+  output.append(new_entry);
+  output.push_back('\n');
+  return output;
+}
+
+void WriteHyConnectProviderLogEntryToFile(const std::string& new_entry,
+                                          int64_t cutoff_ms) {
+  const base::FilePath edc_path = GetEdcPath();
+  if (!base::PathExists(edc_path)) {
+    return;
+  }
+
+  const base::FilePath log_path = GetAbpLogFilePath();
+  base::CreateDirectory(log_path.DirName());
+
+  std::string existing_content;
+  base::ReadFileToStringWithMaxSize(log_path, &existing_content,
+                                    kMaxLogFileReadBytes);
+  const std::string pruned_content =
+      BuildRetainedLogContent(existing_content, new_entry, cutoff_ms);
+  base::WriteFile(log_path, pruned_content);
 }
 
 void LogToABP(const std::string& message) {
-  if (!g_accops_app_checked) {
+  if (!g_abp_log_dir_checked) {
     static bool check_posted = false;
     if (!check_posted) {
       check_posted = true;
-      base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT}, base::BindOnce(&CheckAccopsAppExistsBackground));
+      base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT}, base::BindOnce(&CheckAbpLogDirExistsBackground));
     }
     return;
   }
-  if (!g_accops_app_exists) {
+  if (!g_abp_log_dir_exists) {
     return;
   }
   LOG(WARNING) << "HyConnect Provider: " << message;
-  std::ofstream log_file;
-  log_file.open(kHyConnectLogFilePath, std::ios_base::app);
-  if (log_file.is_open()) {
-    log_file << base::Time::Now() << " - HyConnect: " << message << std::endl;
-    log_file.flush();
-  }
+
+  const base::Time now = base::Time::Now();
+  const int64_t now_ms = now.InMillisecondsSinceUnixEpoch();
+  const int64_t cutoff_ms = (now - kLogRetention).InMillisecondsSinceUnixEpoch();
+  const std::string new_entry =
+      std::to_string(now_ms) + "|" + base::ToString(now) + " - HyConnect: " +
+      message;
+
+  base::ThreadPool::PostTask(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+      base::BindOnce(&WriteHyConnectProviderLogEntryToFile, new_entry,
+                     cutoff_ms));
 }
 
 const char kPolicyServerUrl[] = "http://localhost:16271/streamPluginPolicy";
 const char kNoiseHandshakeHeader[] = "X-Noise-Handshake";
 const int kInitialRetryDelaySeconds = 1;
-const char kPinnedServerStaticPublicKeyHex[] =
-    "551f4f11d6ea7085f4d3258f46f77982bf170f60469c932c507dda3ae9f96f4d";
 
-std::array<uint8_t, 32> GetPinnedServerStaticPublicKey() {
-  std::array<uint8_t, 32> key = {};
+std::optional<std::array<uint8_t, 32>> ReadPublicKeyFile(const base::FilePath& path) {
+  std::string file_content;
+  if (!base::ReadFileToStringWithMaxSize(path, &file_content, 1024) || file_content.empty()) {
+    return std::nullopt;
+  }
+  
+  base::TrimWhitespaceASCII(file_content, base::TRIM_ALL, &file_content);
+  
   std::vector<uint8_t> decoded;
-  bool ok = base::HexStringToBytes(kPinnedServerStaticPublicKeyHex, &decoded);
-  CHECK(ok);
-  CHECK_EQ(decoded.size(), key.size());
+  if (!base::HexStringToBytes(file_content, &decoded) || decoded.size() != 32) {
+    return std::nullopt;
+  }
+  
+  std::array<uint8_t, 32> key;
   std::copy(decoded.begin(), decoded.end(), key.begin());
   return key;
 }
@@ -139,18 +206,31 @@ void HyConnectPolicyProvider::StartRequest() {
   noise_ready_ = false;
   buffer_.clear();
 
+  base::FilePath key_path = GetSpherePublicKeyPath();
+
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+      base::BindOnce(&ReadPublicKeyFile, key_path),
+      base::BindOnce(&HyConnectPolicyProvider::OnPublicKeyRead, weak_factory_.GetWeakPtr()));
+}
+
+void HyConnectPolicyProvider::OnPublicKeyRead(std::optional<std::array<uint8_t, 32>> public_key) {
+  if (!public_key) {
+    LogToABP("Connection initialization failed: key unavailable");
+    StopAndRetry();
+    return;
+  }
+
   std::string client_handshake;
-  if (!noise_session_.InitializeInitiator(GetPinnedServerStaticPublicKey()) ||
+  if (!noise_session_.InitializeInitiator(public_key.value()) ||
       !noise_session_.WriteHandshakeMessage(&client_handshake)) {
-    LogToABP("StartRequest failed: initiator handshake generation failed");
+    LogToABP("Connection initialization failed");
     StopAndRetry();
     return;
   }
 
   std::string client_handshake_b64 = base::Base64Encode(client_handshake);
-  LogToABP("StartRequest connecting to " + std::string(kPolicyServerUrl) +
-           ", client_handshake_bytes=" +
-           std::to_string(client_handshake.size()));
+  LogToABP("Connecting to local policy service");
 
   net::NetworkTrafficAnnotationTag traffic_annotation =
       net::DefineNetworkTrafficAnnotation("hyconnect_policy_fetch", R"(
@@ -225,13 +305,11 @@ void HyConnectPolicyProvider::OnResponseStarted(
     return;
   }
 
-  LogToABP("OnResponseStarted: url=" + final_url.spec() +
-           ", response_code=" +
-           std::to_string(response_head.headers->response_code()));
+  LogToABP("Service responded with code: " + std::to_string(response_head.headers->response_code()));
   std::optional<std::string> server_handshake_b64 =
       response_head.headers->GetNormalizedHeader(kNoiseHandshakeHeader);
   if (!server_handshake_b64) {
-    LogToABP("OnResponseStarted failed: missing X-Noise-Handshake header");
+    LogToABP("Connection rejected: missing required headers");
     StopAndRetry();
     return;
   }
@@ -240,34 +318,30 @@ void HyConnectPolicyProvider::OnResponseStarted(
   std::string server_handshake_b64_str =
       base::CollapseWhitespaceASCII(*server_handshake_b64, true);
   if (!base::Base64Decode(server_handshake_b64_str, &server_handshake)) {
-    LogToABP("OnResponseStarted failed: server handshake base64 decode failed");
+    LogToABP("Connection rejected: invalid header format");
     StopAndRetry();
     return;
   }
 
-  LogToABP("OnResponseStarted: server_handshake_bytes=" +
-           std::to_string(server_handshake.size()));
   if (!noise_session_.ReadHandshakeMessage(server_handshake)) {
-    LogToABP("OnResponseStarted failed: Noise handshake read failed");
+    LogToABP("Connection rejected: validation failed");
     StopAndRetry();
     return;
   }
 
   if (!noise_session_.is_ready()) {
-    LogToABP("OnResponseStarted failed: Noise session not ready after handshake");
+    LogToABP("Connection rejected: session setup incomplete");
     StopAndRetry();
     return;
   }
 
   noise_ready_ = true;
   retry_delay_ = base::Seconds(kInitialRetryDelaySeconds);
-  LogToABP("Noise handshake completed successfully");
+  LogToABP("Secure connection established");
 }
 
 void HyConnectPolicyProvider::OnDataReceived(std::string_view data,
                                              base::OnceClosure resume) {
-  LogToABP("OnDataReceived (Chunk): " + std::to_string(data.size()) + " bytes");
-
   buffer_.append(data);
   ProcessBuffer();
 
@@ -302,8 +376,6 @@ void HyConnectPolicyProvider::ProcessBuffer() {
     base::TrimWhitespaceASCII(data_content, base::TRIM_ALL, &data_content);
     if (!data_content.empty()) {
       // Removed preview= to prevent sensitive data in logs
-      LogToABP("ProcessBuffer extracted SSE data bytes=" +
-               std::to_string(data_content.size()));
       ProcessPolicyData(data_content);
     }
   }
@@ -311,37 +383,34 @@ void HyConnectPolicyProvider::ProcessBuffer() {
 
 void HyConnectPolicyProvider::ProcessPolicyData(const std::string& data) {
   if (!noise_ready_) {
-    LogToABP("ProcessPolicyData ignored: noise session not ready");
+    LogToABP("Data ignored: secure session not ready");
     return;
   }
 
   auto outer_result = base::JSONReader::Read(data, base::JSON_PARSE_RFC);
   if (!outer_result || !outer_result->is_dict()) {
-    LogToABP("ProcessPolicyData failed: outer JSON parse failed");
+    LogToABP("Data processing failed: invalid payload format");
     return;
   }
 
   const std::string* awc_data_b64 = outer_result->GetDict().FindString("awcData");
   if (!awc_data_b64) {
-    LogToABP("ProcessPolicyData failed: outer JSON missing awcData");
+    LogToABP("Data processing failed: invalid payload format");
     return;
   }
 
   std::string encrypted_payload;
   if (!base::Base64Decode(*awc_data_b64, &encrypted_payload)) {
-    LogToABP("ProcessPolicyData failed: awcData base64 decode failed");
+    LogToABP("Data processing failed: invalid payload format");
     return;
   }
 
   std::string decrypted_payload;
   if (!noise_session_.Decrypt(encrypted_payload, &decrypted_payload)) {
-    LogToABP("ProcessPolicyData failed: Noise decrypt failed, ciphertext_bytes=" +
-             std::to_string(encrypted_payload.size()));
+    LogToABP("Data processing failed: structured payload validation error");
     return;
   }
 
-  LogToABP("ProcessPolicyData decrypt ok: plaintext_bytes=" +
-           std::to_string(decrypted_payload.size()));
   ProcessDecryptedPolicyData(decrypted_payload);
   
   // Securely clear the sensitive plaintext from memory to prevent extraction from memory dumps
@@ -352,7 +421,7 @@ void HyConnectPolicyProvider::ProcessDecryptedPolicyData(
     const std::string& data) {
   auto result = base::JSONReader::Read(data, base::JSON_PARSE_RFC);
   if (!result || !result->is_dict()) {
-    LogToABP("ProcessDecryptedPolicyData failed: inner JSON parse failed");
+    LogToABP("Policy configuration parse failed");
     return;
   }
 
@@ -367,7 +436,7 @@ void HyConnectPolicyProvider::ProcessDecryptedPolicyData(
   }
 
   if (!is_logged_in) {
-    LogToABP("ProcessDecryptedPolicyData: loginStatus=false, clearing policies");
+    LogToABP("Local state indicates unavailable policies. Clearing applied rules.");
     last_applied_policies_.clear();
     PolicyBundle bundle;
     UpdatePolicy(std::move(bundle));
@@ -376,31 +445,31 @@ void HyConnectPolicyProvider::ProcessDecryptedPolicyData(
 
   const std::string* policy_data_b64 = dict.FindString("policydata");
   if (!policy_data_b64) {
-    LogToABP("ProcessDecryptedPolicyData failed: missing policydata");
+    LogToABP("Policy configuration missing required payload");
     return;
   }
 
   std::string decoded_policy_json;
   if (!base::Base64Decode(*policy_data_b64, &decoded_policy_json)) {
     LOG(ERROR) << "Failed to decode Base64 policy data";
-    LogToABP("ProcessDecryptedPolicyData failed: policydata base64 decode failed");
+    LogToABP("Policy decoding error");
     return;
   }
 
   auto policies_value = base::JSONReader::Read(decoded_policy_json, base::JSON_PARSE_RFC);
   if (!policies_value || !policies_value->is_dict()) {
     LOG(ERROR) << "Failed to parse decoded policy JSON";
-    LogToABP("ProcessDecryptedPolicyData failed: decoded policy JSON parse failed");
+    LogToABP("Policy payload processing error");
     std::fill(decoded_policy_json.begin(), decoded_policy_json.end(), '\0');
     return;
   }
 
   if (policies_value->GetDict().empty()) {
     if (!last_applied_policies_.empty()) {
-      LogToABP("ProcessDecryptedPolicyData: ignoring empty logged-in policy payload and preserving last HyConnect policies");
+      LogToABP("Preserving previous policies due to empty update");
       return;
     }
-    LogToABP("ProcessDecryptedPolicyData: logged-in policy payload is empty and no prior HyConnect policies exist");
+    LogToABP("No policies to apply currently");
   }
 
   PolicyBundle bundle;
@@ -411,8 +480,7 @@ void HyConnectPolicyProvider::ProcessDecryptedPolicyData(
                       POLICY_SOURCE_PLATFORM, value.Clone(), nullptr);
   }
 
-  LogToABP("Applying " + std::to_string(policies_value->GetDict().size()) +
-           " policies.");
+  LogToABP("Applying updated policies");
   last_applied_policies_ = policies_value->GetDict().Clone();
   UpdatePolicy(std::move(bundle));
   

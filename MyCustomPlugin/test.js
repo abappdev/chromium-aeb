@@ -1,866 +1,760 @@
 #!/usr/bin/env node
 
-/**
- * HyConnect Policy Dashboard Server (ESM)
- * - Interactive policy selection table with Tailwind CSS
- * - Real-time JSON/Base64/AES-256-GCM outputs
- * - Toggle Login / Logout
- */
-
 import http from "node:http";
 import { exec } from "node:child_process";
-import crypto from "node:crypto";
 
-const PORT = 16271;
-const ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef"; // 32 bytes for AES-256
-const ALGO_AES_256_GCM = 0x01;
+const PORT = 8889;
+const APP_URL = `http://127.0.0.1:${PORT}`;
 
-let loggedIn = false;
-let clients = [];
-
-const POLICIES = [
-  /* --- Startup / Homepage --- */
-  { key: "HomepageLocation", type: "string", default: "" },
-  { key: "HomepageIsNewTabPage", type: "bool", default: false },
-  { key: "RestoreOnStartup", type: "int", default: 0 },
-  { key: "RestoreOnStartupURLs", type: "string", default: "" },
-  /* --- Downloads --- */
-  { key: "DownloadRestrictions", type: "int", default: 0 },
-  { key: "PromptForDownloadLocation", type: "bool", default: false },
-  { key: "DefaultDownloadDirectory", type: "string", default: "" },
-  { key: "AllowFileSelectionDialogs", type: "bool", default: true },
-  /* --- Incognito / Privacy --- */
-  { key: "IncognitoModeAvailability", type: "int", default: 0 },
-  { key: "SavingBrowserHistoryDisabled", type: "bool", default: false },
-  { key: "ClearBrowsingDataOnExit", type: "bool", default: false },
-  { key: "AllowDeletingBrowserHistory", type: "bool", default: true },
-  /* --- Passwords / Autofill --- */
-  { key: "PasswordManagerEnabled", type: "bool", default: true },
-  { key: "AutofillEnabled", type: "bool", default: true },
-  { key: "AutofillAddressEnabled", type: "bool", default: true },
-  { key: "AutofillCreditCardEnabled", type: "bool", default: true },
-  /* --- Security / Safe Browsing --- */
-  { key: "SafeBrowsingEnabled", type: "bool", default: true },
-  { key: "SafeBrowsingProtectionLevel", type: "int", default: 1 },
-  { key: "DisableSafeBrowsingProceedAnyway", type: "bool", default: false },
-  { key: "SSLErrorOverrideAllowed", type: "bool", default: true },
-  /* --- Extensions --- */
-  { key: "ExtensionInstallBlocklist", type: "string", default: "" },
-  { key: "ExtensionInstallAllowlist", type: "string", default: "" },
-  { key: "ExtensionInstallForcelist", type: "string", default: "" },
-  { key: "ExtensionAllowedTypes", type: "string", default: "" },
-  { key: "DeveloperToolsDisabled", type: "bool", default: false },
-  /* --- Printing --- */
-  { key: "PrintingEnabled", type: "bool", default: true },
-  { key: "PrintPreviewDisabled", type: "bool", default: false },
-  { key: "DisablePrintPreview", type: "bool", default: false },
-  /* --- Network / Proxy --- */
-  { key: "ProxyMode", type: "string", default: "" },
-  { key: "ProxyServer", type: "string", default: "" },
-  { key: "ProxyBypassList", type: "string", default: "" },
-  { key: "EnableOnlineRevocationChecks", type: "bool", default: false },
-  /* --- Cookies / Content --- */
-  { key: "DefaultCookiesSetting", type: "int", default: 0 },
-  { key: "BlockThirdPartyCookies", type: "bool", default: false },
-  { key: "CookiesAllowedForUrls", type: "string", default: "" },
-  { key: "CookiesBlockedForUrls", type: "string", default: "" },
-  /* --- Media / Clipboard --- */
-  { key: "AudioCaptureAllowed", type: "bool", default: true },
-  { key: "VideoCaptureAllowed", type: "bool", default: true },
-  { key: "ClipboardAllowed", type: "bool", default: true },
-  { key: "ClipboardAllowedForUrls", type: "string", default: "" },
-  /* --- Popups / JavaScript --- */
-  { key: "DefaultPopupsSetting", type: "int", default: 0 },
-  { key: "JavascriptEnabled", type: "bool", default: true },
-  { key: "PopupsAllowedForUrls", type: "string", default: "" },
-  { key: "PopupsBlockedForUrls", type: "string", default: "" },
-  /* --- Certificates / TLS --- */
-  { key: "AuthSchemes", type: "string", default: "" },
-  { key: "DisableAuthNegotiateCnameLookup", type: "bool", default: false },
-  { key: "EnableAuthNegotiatePort", type: "bool", default: false },
-  /* --- UI / UX --- */
-  { key: "ShowHomeButton", type: "bool", default: true },
-  { key: "BookmarkBarEnabled", type: "bool", default: true },
-  { key: "EditBookmarksEnabled", type: "bool", default: true },
-  { key: "BrowserAddPersonEnabled", type: "bool", default: true },
-  /* --- Updates --- */
-  { key: "AutoUpdateCheckPeriodMinutes", type: "int", default: 1440 },
-  { key: "ComponentUpdatesEnabled", type: "bool", default: true },
-  /* --- Misc --- */
-  { key: "TranslateEnabled", type: "bool", default: true },
-  { key: "DefaultSearchProviderEnabled", type: "bool", default: true },
-  { key: "DefaultSearchProviderName", type: "string", default: "" },
-  { key: "DefaultSearchProviderSearchURL", type: "string", default: "" },
-  { key: "NetworkPredictionOptions", type: "int", default: 0 },
-  { key: "MetricsReportingEnabled", type: "bool", default: false },
-  { key: "CloudReportingEnabled", type: "bool", default: false },
-  { key: "SigninAllowed", type: "bool", default: true },
-  { key: "SyncDisabled", type: "bool", default: false },
-  { key: "BackgroundModeEnabled", type: "bool", default: true },
-  { key: "HideWebStoreIcon", type: "bool", default: false },
-  { key: "ForceEphemeralProfiles", type: "bool", default: false },
-  { key: "BrowserSignin", type: "int", default: 0 },
-  { key: "NewTabPageLocation", type: "string", default: "" },
-  { key: "TaskManagerEndProcessEnabled", type: "bool", default: true },
-  { key: "AllowCrossOriginAuthPrompt", type: "bool", default: false },
-  { key: "EnableMediaRouter", type: "bool", default: true },
-  { key: "MediaRouterCastAllowAllIPs", type: "bool", default: false },
-  { key: "EnableDeprecatedWebPlatformFeatures", type: "bool", default: false },
+const SUPPORTED_POLICIES = [
+  {
+    key: "NewTabPageLocation",
+    type: "string",
+    default: "https://outlook.com",
+    placeholder: "https://outlook.com",
+  },
+  {
+    key: "ShowHomeButton",
+    type: "bool",
+    default: false,
+  },
+  {
+    key: "DownloadRestrictions",
+    type: "int",
+    default: 3,
+    placeholder: "3",
+  },
+  {
+    key: "DownloadDirectory",
+    type: "string",
+    default: "/Users/Shared/edc",
+    placeholder: "/Users/Shared/edc",
+  },
+  {
+    key: "PrintingEnabled",
+    type: "bool",
+    default: false,
+  },
+  {
+    key: "DeveloperToolsAvailability",
+    type: "int",
+    default: 2,
+    placeholder: "2",
+  },
+  {
+    key: "ScreenCaptureAllowed",
+    type: "bool",
+    default: false,
+  },
+  {
+    key: "DefaultClipboardSetting",
+    type: "int",
+    default: 2,
+    placeholder: "2",
+  },
+  {
+    key: "ClipboardAllowedForUrls",
+    type: "list",
+    default: ["https://accops.com", "https://*.accops.com"],
+    placeholder: "One URL per line",
+  },
 ];
 
-// Store selected policies and encrypted data
-let selectedPolicies = {};
-let streamFormat = "encrypted"; // 'encrypted' or 'base64'
-
-const policiesJSON = JSON.stringify(POLICIES);
-
-function encryptData(base64Data) {
-  const algorithm = "aes-256-gcm";
-  const key = Buffer.from(ENCRYPTION_KEY, "utf8");
-  const ivLength = 12;
-
-  const iv = crypto.randomBytes(ivLength);
-  const cipher = crypto.createCipheriv(algorithm, key, iv);
-
-  let encrypted = cipher.update(base64Data, "utf8");
-  encrypted = Buffer.concat([encrypted, cipher.final()]);
-
-  const authTag = cipher.getAuthTag();
-
-  const algoIdBuf = Buffer.from([ALGO_AES_256_GCM]);
-  const combined = Buffer.concat([algoIdBuf, iv, encrypted, authTag]);
-
-  return combined.toString("base64");
-}
-
-function getDecodedPolicy() {
-  return loggedIn ? selectedPolicies : {};
-}
-
-function getPolicyPayload() {
-  const policy = getDecodedPolicy();
-  const jsonStr = JSON.stringify(policy);
-  const base64 = Buffer.from(jsonStr).toString("base64");
-
-  // Log for debugging
-  console.log("=== POLICY PAYLOAD DEBUG ===");
-  console.log("Login Status:", loggedIn);
-  console.log("Stream Format:", streamFormat);
-  console.log("Original JSON:", jsonStr);
-  console.log("Base64 Encoded:", base64);
-  // Calculate payload based on format
-  let finalPayload = base64;
-  if (streamFormat === "encrypted") {
-    finalPayload = encryptData(base64);
-    console.log("Sending Encrypted Data (len):", finalPayload.length);
-  }
-  console.log("=======================");
-
-  return {
-    loginStatus: loggedIn,
-    policydata: finalPayload,
-  };
-}
-
-function sendPolicy() {
-  const payload = getPolicyPayload();
-  const data = `data: ${JSON.stringify(payload)}\n\n`;
-
-  clients.forEach((res) => res.write(data));
-  console.log("Policy sent to", clients.length, "client(s)");
-}
-
-/* ------------------ HTTP Server ------------------ */
-
-const server = http.createServer((req, res) => {
-  // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(200);
-    res.end();
-    return;
+function openBrowser(url) {
+  let command;
+  if (process.platform === "darwin") {
+    command = `open "${url}"`;
+  } else if (process.platform === "win32") {
+    command = `start "" "${url}"`;
+  } else {
+    command = `xdg-open "${url}"`;
   }
 
-  // Serve dashboard HTML
-  if (req.url === "/") {
-    const policiesJSON = JSON.stringify(POLICIES);
-    const decoded = JSON.stringify(getDecodedPolicy(), null, 2);
-    const base64 = Buffer.from(JSON.stringify(getDecodedPolicy())).toString(
-      "base64",
-    );
-    const encrypted = getPolicyPayload().policydata;
+  exec(command, (error) => {
+    if (error) {
+      console.log(`Open browser manually at ${url}`);
+    }
+  });
+}
 
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(`<!DOCTYPE html>
+const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HyConnect Policy Dashboard</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <title>Policy JSON Builder</title>
   <style>
-    * { font-family: 'Inter', sans-serif; }
-    
-    /* Custom scrollbar */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: #f4f4f5; }
-    ::-webkit-scrollbar-thumb { background: #a1a1aa; border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: #71717a; }
-    
-    /* Text utilities */
-    .wrap-text { white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word; }
-    
-    /* Table layout */
-    table { table-layout: fixed; width: 100%; }
-    td, th { word-wrap: break-word; overflow-wrap: break-word; }
-    td { max-width: 0; }
-    
-    /* Encoded output formatting */
-    #base64Output, #encryptedOutput {
-      word-break: break-all;
-      white-space: pre-wrap;
+    :root {
+      color-scheme: light;
+      --bg: #f8fafc;
+      --panel: #ffffff;
+      --line: #dbe4ea;
+      --text: #10212b;
+      --muted: #52606d;
+      --accent: #0f766e;
+      --accent-dark: #115e59;
+      --soft: #edf7f5;
+      --code: #0f172a;
+      --code-text: #dbeafe;
+      --warn: #b45309;
     }
-    
-    /* Modern card design */
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, #d1fae5 0, transparent 30%),
+        radial-gradient(circle at bottom right, #dbeafe 0, transparent 35%),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
+    }
+    .wrap {
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: 18px 20px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .hero {
+      margin-bottom: 20px;
+      flex: 0 0 auto;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+    }
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      max-width: 860px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 7fr 3fr;
+      gap: 20px;
+      align-items: stretch;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 14px 40px rgba(15, 23, 42, 0.06);
+    }
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 18px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      transition: background 0.2s ease;
+    }
+    button:hover {
+      background: var(--accent-dark);
+    }
+    button.secondary {
+      background: #e5e7eb;
+      color: var(--text);
+    }
+    button.secondary:hover {
+      background: #d1d5db;
+    }
     .policy-row {
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      display: grid;
+      grid-template-columns: 28px 220px 1fr 88px;
+      gap: 12px;
+      align-items: start;
+      padding: 12px 0;
+      border-top: 1px solid #edf2f7;
+      transition: background 0.18s ease, transform 0.18s ease;
+    }
+    .policy-row:first-of-type {
+      border-top: 0;
     }
     .policy-row:hover {
-      background: linear-gradient(to right, #f9fafb, #f3f4f6);
+      background: #f8fafc;
       transform: translateY(-1px);
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
     }
-    
-    /* Collapsible cards */
-    .output-card { 
+    .policy-key {
+      font-weight: 700;
+    }
+    .policy-type {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+    }
+    input[type="text"]:focus,
+    input[type="number"]:focus,
+    textarea:focus,
+    select:focus,
+    button:focus,
+    input[type="checkbox"]:focus {
+      outline: 3px solid rgba(15, 118, 110, 0.18);
+      outline-offset: 2px;
+    }
+    textarea {
+      min-height: 90px;
+      resize: vertical;
+    }
+    .bool-wrap {
+      display: flex;
+      align-items: center;
+      min-height: 42px;
+    }
+    .custom-grid {
+      display: grid;
+      grid-template-columns: 1fr 140px;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .custom-grid .full {
+      grid-column: 1 / -1;
+    }
+    .hint, .storage-note {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .storage-note {
+      color: var(--warn);
+      margin-bottom: 14px;
+    }
+    pre {
+      margin: 0;
+      padding: 14px;
+      border-radius: 12px;
+      background: var(--code);
+      color: var(--code-text);
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .section {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 0;
       overflow: hidden;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
-    .output-card.collapsed .output-content { 
-      max-height: 0; 
-      opacity: 0; 
-      margin: 0; 
-      padding: 0; 
-      overflow: hidden; 
-      transition: all 0.3s ease;
+    .right-top-card {
+      flex: 0 0 auto;
     }
-    .output-card:not(.collapsed) .output-content { 
-      max-height: 500px; 
-      opacity: 1; 
-      transition: all 0.3s ease;
+    .output-stack {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      min-height: 0;
+      flex: 1 1 auto;
     }
-    .output-card.collapsed .expand-icon { transform: rotate(-90deg); }
-    .output-card:hover { 
-      border-color: #e4e4e7;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    .policy-card {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      height: 100%;
+      overflow: hidden;
     }
-    
-    /* Glass morphism */
-    .glass {
-      background: rgba(255, 255, 255, 0.8);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
+    .policy-list-scroll {
+      min-height: 0;
+      overflow: auto;
+      padding-right: 4px;
     }
-    
-    /* Button enhancements */
-    button {
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    .policy-list-scroll::-webkit-scrollbar {
+      width: 10px;
     }
-    
-    /* Input focus states */
-    input:focus, select:focus {
-      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    .policy-list-scroll::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 999px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
     }
-    
-    /* Badge styles */
-    .badge {
+    .policy-list-scroll::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .pill {
       display: inline-flex;
       align-items: center;
-      gap: 0.25rem;
-      padding: 0.25rem 0.75rem;
-      font-size: 0.75rem;
-      font-weight: 600;
-      border-radius: 9999px;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: #ecfeff;
+      color: #155e75;
+      font-size: 11px;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.04em;
+      margin-top: 6px;
+    }
+    .delete-btn {
+      background: #fff1f2;
+      color: #be123c;
+      border: 1px solid #fecdd3;
+      padding: 8px 10px;
+      width: 100%;
+    }
+    .delete-btn:hover {
+      background: #ffe4e6;
+    }
+    .delete-slot {
+      display: flex;
+      align-items: center;
+      min-height: 42px;
+    }
+    .output-card {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .output-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .output-header h2 {
+      margin: 0;
+      font-size: 17px;
+    }
+    .copy-btn {
+      background: #ecfeff;
+      color: #155e75;
+      border: 1px solid #bae6fd;
+      padding: 8px 11px;
+      white-space: nowrap;
+    }
+    .copy-btn:hover {
+      background: #cffafe;
+    }
+    .compact-pre {
+      flex: 1 1 auto;
+      min-height: 0;
+      max-height: none;
+      border: 1px solid #1e293b;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+    .hint {
+      margin-top: 8px;
+    }
+    @media (max-width: 980px) {
+      body {
+        overflow: auto;
+      }
+      .wrap {
+        height: auto;
+        min-height: 100vh;
+        padding: 14px;
+      }
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .section {
+        overflow: visible;
+      }
+      .output-stack {
+        grid-template-rows: auto;
+      }
+      .policy-row {
+        grid-template-columns: 28px 1fr;
+      }
+      .policy-row > div:nth-child(3),
+      .policy-row > div:nth-child(4) {
+        grid-column: 1 / -1;
+      }
+      .custom-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
-<body class="bg-zinc-50 min-h-screen">
-  <header class="bg-white border-b border-zinc-200 sticky top-0 z-50 shadow-sm">
-    <div class="px-6 py-4 flex justify-between items-center gap-6">
-      <div class="flex items-center gap-3">
-        <div class="w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-lg flex items-center justify-center shadow-sm">
-          <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
-          </svg>
-        </div>
-        <div>
-          <h1 class="text-lg font-semibold text-zinc-900">HyConnect Policy Dashboard</h1>
-          <p class="text-xs text-zinc-500">Enterprise Policy Management</p>
-        </div>
-      </div>
-      <div class="flex-1 flex justify-center max-w-2xl">
-        <input type="text" id="policySearch" placeholder="🔍 Search policies..." class="px-4 py-2 border border-zinc-200 bg-white text-zinc-900 placeholder-zinc-400 rounded-lg text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 w-full max-w-md transition-all"/>
-      </div>
-      <div class="flex items-center gap-3">
-        <span class="badge ${loggedIn ? "bg-emerald-100 text-emerald-700 border border-emerald-200" : "bg-rose-100 text-rose-700 border border-rose-200"}">${loggedIn ? "✓ Logged In" : "✗ Logged Out"}</span>
-        <button onclick="toggle()" class="px-4 py-2 ${loggedIn ? "bg-rose-600 hover:bg-rose-700" : "bg-emerald-600 hover:bg-emerald-700"} text-white rounded-lg font-medium text-sm shadow-sm hover:shadow transition-all">${loggedIn ? "Logout" : "Login"}</button>
-      </div>
-    </div>
-  </header>
-
-  <div class="flex h-[calc(100vh-73px)]">
-    <div class="w-[60%] flex flex-col bg-white border-r border-zinc-200">
-      <div class="flex-1 overflow-y-auto">
-        <table class="w-full text-sm">
-          <thead class="sticky top-0 z-10 bg-zinc-100 border-b border-zinc-200">
-            <tr>
-              <th class="px-4 py-3 text-left font-medium text-xs text-zinc-700 uppercase tracking-wider w-12">Sr</th>
-              <th class="px-4 py-3 text-left font-medium text-xs text-zinc-700 uppercase tracking-wider w-40">Policy Name</th>
-              <th class="px-4 py-3 text-left font-medium text-xs text-zinc-700 uppercase tracking-wider w-20">Type</th>
-              <th class="px-4 py-3 text-left font-medium text-xs text-zinc-700 uppercase tracking-wider w-40">Value</th>
-              <th class="px-4 py-3 text-center font-medium text-xs text-zinc-700 uppercase tracking-wider w-16">Enable</th>
-              <th class="px-4 py-3 text-center font-medium text-xs text-zinc-700 uppercase tracking-wider w-16">Action</th>
-            </tr>
-          </thead>
-          <tbody id="policyTableBody" class="bg-white divide-y divide-zinc-100"></tbody>
-        </table>
-      </div>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <h1>Policy JSON Builder</h1>
+      <p class="subtitle">Build supported Chromium policies plus your own custom policies. The page stores policy definitions and current selections in browser storage, and outputs plain JSON plus Base64 only.</p>
     </div>
 
-    <div class="w-[40%] flex flex-col bg-zinc-50">
-      <div class="px-6 py-4 bg-white border-b border-zinc-200 flex justify-between items-center">
-        <h2 class="text-lg font-semibold text-zinc-900 flex items-center gap-2">
-          <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-          </svg>
-          Output & Encryption
-        </h2>
-        <div class="flex items-center gap-2">
-          <span class="text-xs text-zinc-600 font-medium">Stream Format:</span>
-          <button onclick="toggleStreamFormat()" id="streamFormatBtn" class="px-3 py-1.5 border border-zinc-300 rounded-lg text-xs font-medium hover:bg-zinc-50 transition-all ${streamFormat === "base64" ? "bg-blue-100 text-blue-700" : ""}">
-            ${streamFormat === "encrypted" ? "Encrypted" : "Base64"}
-          </button>
+    <div class="grid">
+      <section class="card policy-card">
+        <h2>Policies</h2>
+        <div class="toolbar">
+          <button type="button" onclick="applyDefaults()">Use Defaults</button>
+          <button type="button" class="secondary" onclick="clearSelection()">Clear All</button>
+          <button type="button" class="secondary" onclick="resetCustomPolicies()">Reset Custom Policies</button>
         </div>
-      </div>
-      <div class="flex-1 overflow-y-auto p-6 space-y-5">
-        <!-- Custom Policy Addition Card -->
-        <div class="bg-white rounded-lg p-5 shadow-sm border border-zinc-200">
-          <div class="flex items-center gap-2 mb-4">
-            <div class="w-8 h-8 bg-emerald-100 text-emerald-600 rounded-lg flex items-center justify-center font-bold">
-              +
+        <div id="policyList" class="policy-list-scroll"></div>
+      </section>
+
+      <section class="section">
+        <div class="card right-top-card" style="background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 100%);">
+          <h2>Add Custom Policy</h2>
+          <div class="custom-grid">
+            <input id="customKey" type="text" placeholder="Policy key">
+            <select id="customType" onchange="updateCustomValueField()">
+              <option value="string">string</option>
+              <option value="int">int</option>
+              <option value="bool">bool</option>
+              <option value="list">list&lt;string&gt;</option>
+            </select>
+            <div id="customValueHolder" class="full"></div>
+          </div>
+          <button type="button" onclick="addCustomPolicy()">Add Custom Policy</button>
+          <p class="storage-note">Custom policies and current selections are stored in browser localStorage.</p>
+        </div>
+
+        <div class="output-stack">
+          <div class="card output-card">
+            <div class="output-header">
+              <h2>Policy JSON</h2>
+              <button type="button" class="copy-btn" onclick="copyOutput('jsonOutput', this)">Copy JSON</button>
             </div>
-            <h3 class="text-sm font-semibold text-zinc-900">Add Custom Policy</h3>
+            <pre id="jsonOutput" class="compact-pre">{}</pre>
+            <p class="hint">Exact JSON object generated from enabled policies.</p>
           </div>
-          <div class="space-y-3">
-            <input type="text" id="customPolicyName" placeholder="Policy name" class="w-full px-3 py-2 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 bg-white transition-all"/>
-            <div class="flex gap-2">
-              <select id="customPolicyType" onchange="updateValueInputType()" class="flex-1 px-3 py-2 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 bg-white transition-all">
-                <option value="string">string</option>
-                <option value="int">int</option>
-                <option value="bool">bool</option>
-              </select>
-              <div id="customPolicyValueContainer" class="flex-[2]">
-                <input type="text" id="customPolicyValue" placeholder="Value (optional)" class="w-full px-3 py-2 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 bg-white transition-all"/>
-              </div>
+          <div class="card output-card">
+            <div class="output-header">
+              <h2>Base64</h2>
+              <button type="button" class="copy-btn" onclick="copyOutput('base64Output', this)">Copy Base64</button>
             </div>
-            <button onclick="handleAddCustomPolicy()" class="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium text-sm shadow-sm hover:shadow transition-all">
-              + Add Custom Policy
-            </button>
+            <pre id="base64Output" class="compact-pre">e30=</pre>
+            <p class="hint">Base64 of the compact JSON object above.</p>
           </div>
         </div>
-
-        <div class="output-card bg-white rounded-lg p-4 shadow-sm border border-zinc-200 transition-all duration-300">
-          <div class="flex items-center gap-2 mb-3 cursor-pointer" onclick="toggleCard(this)">
-            <div class="w-7 h-7 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center text-xs font-semibold">1</div>
-            <h3 class="text-sm font-medium text-zinc-900">Decoded Policy JSON</h3>
-            <svg class="expand-icon w-4 h-4 ml-auto text-zinc-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-            </svg>
-          </div>
-          <pre id="jsonOutput" class="output-content bg-zinc-900 text-emerald-400 p-3 rounded-md text-xs leading-relaxed font-mono wrap-text max-h-64 overflow-auto">${decoded}</pre>
-        </div>
-
-        <div class="output-card bg-white rounded-lg p-4 shadow-sm border border-zinc-200 transition-all duration-300">
-          <div class="flex items-center gap-2 mb-3 cursor-pointer" onclick="toggleCard(this)">
-            <div class="w-7 h-7 bg-amber-100 text-amber-600 rounded-lg flex items-center justify-center text-xs font-semibold">2</div>
-            <h3 class="text-sm font-medium text-zinc-900">Base64 Encoded</h3>
-            <svg class="expand-icon w-4 h-4 ml-auto text-zinc-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-            </svg>
-          </div>
-          <pre id="base64Output" class="output-content bg-zinc-900 text-amber-400 p-3 rounded-md text-xs leading-relaxed font-mono wrap-text max-h-48 overflow-auto">${base64}</pre>
-        </div>
-
-        <div class="output-card bg-white rounded-lg p-4 shadow-sm border border-zinc-200 transition-all duration-300">
-          <div class="flex items-center gap-2 mb-3 cursor-pointer" onclick="toggleCard(this)">
-            <div class="w-7 h-7 bg-purple-100 text-purple-600 rounded-lg flex items-center justify-center text-xs font-semibold">3</div>
-            <h3 class="text-sm font-medium text-zinc-900">AES-256-GCM Encrypted</h3>
-            <svg class="expand-icon w-4 h-4 ml-auto text-zinc-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-            </svg>
-          </div>
-          <pre id="encryptedOutput" class="output-content bg-zinc-900 text-purple-400 p-3 rounded-md text-xs leading-relaxed font-mono wrap-text max-h-48 overflow-auto">${encrypted}</pre>
-          <p class="output-content text-xs text-zinc-500 mt-2">Format: [AlgoID(1)] + [IV(12)] + [Ciphertext] + [AuthTag(16)]</p>
-        </div>
-
-        <div class="output-card bg-white rounded-lg p-4 shadow-sm border border-zinc-200 transition-all duration-300">
-          <div class="flex items-center gap-2 mb-3 cursor-pointer" onclick="toggleCard(this)">
-            <div class="w-7 h-7 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center text-xs font-semibold">4</div>
-            <h3 class="text-sm font-medium text-zinc-900">SSE Response Stream</h3>
-            <svg class="expand-icon w-4 h-4 ml-auto text-zinc-400 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-            </svg>
-          </div>
-          <pre id="sseResponse" class="output-content bg-zinc-900 text-cyan-400 p-3 rounded-md text-xs leading-relaxed font-mono wrap-text max-h-48 overflow-auto">{"loginStatus": true, "policydata": "..."}</pre>
-          <p class="output-content text-xs text-zinc-500 mt-2">Actual payload sent to browser via SSE</p>
-        </div>
-      </div>
+      </section>
     </div>
   </div>
 
   <script>
-    const BASE_POLICIES = ${policiesJSON};
-    let customPolicies = [];
-    let loggedIn = ${loggedIn};
-    let POLICIES = [];
-    let selectedPolicies = {};
-    let filteredPolicies = [];
-    let streamFormat = '${streamFormat}'; // 'encrypted' or 'base64'
+    const BASE_POLICIES = ${JSON.stringify(SUPPORTED_POLICIES)};
+    const STORAGE_KEYS = {
+      customPolicies: "hyconnect_custom_policies_v2",
+      selections: "hyconnect_policy_selections_v2",
+    };
 
-    // Toggle stream format
-    function toggleStreamFormat() {
-      streamFormat = streamFormat === 'encrypted' ? 'base64' : 'encrypted';
-      const btn = document.getElementById('streamFormatBtn');
-      btn.textContent = streamFormat === 'encrypted' ? 'Encrypted' : 'Base64';
-      btn.classList.toggle('bg-blue-100');
-      btn.classList.toggle('text-blue-700');
-      
-      // Sync with server
-      fetch('/toggleStreamFormat')
-        .then(r => r.json())
-        .then(data => {
-          console.log('Server stream format:', data.format);
-        })
-        .catch(err => console.error('Failed to toggle stream format:', err));
-      
+    let policies = [];
+    let customPolicies = [];
+
+    function cloneValue(value) {
+      return Array.isArray(value) ? [...value] : value;
+    }
+
+    function toggleId(key) {
+      return "toggle_" + key;
+    }
+
+    function inputId(key) {
+      return "input_" + key;
+    }
+
+    function getDefaultEnabled(policy) {
+      return policy.default !== "" &&
+             !(Array.isArray(policy.default) && policy.default.length === 0);
+    }
+
+    function saveSelections() {
+      const selections = {};
+      policies.forEach((policy) => {
+        const toggle = document.getElementById(toggleId(policy.key));
+        const input = document.getElementById(inputId(policy.key));
+        if (!toggle || !input) {
+          return;
+        }
+        let value;
+        if (policy.type === "bool") {
+          value = input.checked;
+        } else if (policy.type === "list") {
+          value = input.value;
+        } else {
+          value = input.value;
+        }
+        selections[policy.key] = {
+          enabled: toggle.checked,
+          value,
+        };
+      });
+      localStorage.setItem(STORAGE_KEYS.selections, JSON.stringify(selections));
+    }
+
+    function loadSelections() {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEYS.selections) || "{}");
+      } catch {
+        return {};
+      }
+    }
+
+    function saveCustomPolicies() {
+      localStorage.setItem(STORAGE_KEYS.customPolicies, JSON.stringify(customPolicies));
+    }
+
+    function loadCustomPolicies() {
+      try {
+        customPolicies = JSON.parse(localStorage.getItem(STORAGE_KEYS.customPolicies) || "[]");
+      } catch {
+        customPolicies = [];
+      }
+      policies = [...BASE_POLICIES, ...customPolicies];
+    }
+
+    function updateCustomValueField() {
+      const type = document.getElementById("customType").value;
+      const holder = document.getElementById("customValueHolder");
+      if (type === "bool") {
+        holder.innerHTML = '<label class="bool-wrap"><input id="customValueBool" type="checkbox"> Default true</label>';
+      } else if (type === "list") {
+        holder.innerHTML = '<textarea id="customValueList" placeholder="One string per line"></textarea>';
+      } else if (type === "int") {
+        holder.innerHTML = '<input id="customValueText" type="number" placeholder="Default integer value">';
+      } else {
+        holder.innerHTML = '<input id="customValueText" type="text" placeholder="Default string value">';
+      }
+    }
+
+    function getCustomDefaultValue() {
+      const type = document.getElementById("customType").value;
+      if (type === "bool") {
+        return document.getElementById("customValueBool").checked;
+      }
+      if (type === "list") {
+        return document.getElementById("customValueList").value
+          .split("\\n")
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+      if (type === "int") {
+        const raw = document.getElementById("customValueText").value.trim();
+        return raw === "" ? 0 : Number.parseInt(raw, 10);
+      }
+      return document.getElementById("customValueText").value.trim();
+    }
+
+    function addCustomPolicy() {
+      const key = document.getElementById("customKey").value.trim();
+      const type = document.getElementById("customType").value;
+      if (!key) {
+        alert("Policy key is required.");
+        return;
+      }
+      if (policies.some((policy) => policy.key.toLowerCase() === key.toLowerCase())) {
+        alert("Policy key already exists.");
+        return;
+      }
+
+      customPolicies.push({
+        key,
+        type,
+        default: getCustomDefaultValue(),
+        placeholder: type === "list" ? "One string per line" : "",
+      });
+      saveCustomPolicies();
+      loadCustomPolicies();
+      renderPolicies();
+
+      document.getElementById("customKey").value = "";
+      document.getElementById("customType").value = "string";
+      updateCustomValueField();
+    }
+
+    function isCustomPolicy(key) {
+      return customPolicies.some((policy) => policy.key === key);
+    }
+
+    function deleteCustomPolicy(key) {
+      customPolicies = customPolicies.filter((policy) => policy.key !== key);
+      saveCustomPolicies();
+
+      const selections = loadSelections();
+      delete selections[key];
+      localStorage.setItem(STORAGE_KEYS.selections, JSON.stringify(selections));
+
+      loadCustomPolicies();
+      renderPolicies();
+    }
+
+    function resetCustomPolicies() {
+      customPolicies = [];
+      saveCustomPolicies();
+      localStorage.removeItem(STORAGE_KEYS.selections);
+      loadCustomPolicies();
+      renderPolicies();
+    }
+
+    function renderInput(policy, savedSelection) {
+      const savedValue = savedSelection ? savedSelection.value : undefined;
+      if (policy.type === "bool") {
+        const checked = typeof savedValue === "boolean" ? savedValue : Boolean(policy.default);
+        return '<div class="bool-wrap"><label><input type="checkbox" id="' + inputId(policy.key) + '"' +
+          (checked ? " checked" : "") + '> Value</label></div>';
+      }
+      if (policy.type === "list") {
+        const text = Array.isArray(savedValue) ? savedValue.join("\\n") :
+          typeof savedValue === "string" ? savedValue :
+          (policy.default || []).join("\\n");
+        return '<textarea id="' + inputId(policy.key) + '" placeholder="' + (policy.placeholder || "") + '">' + text + '</textarea>';
+      }
+      const value = savedSelection ? savedValue : policy.default;
+      const inputType = policy.type === "int" ? "number" : "text";
+      return '<input id="' + inputId(policy.key) + '" type="' + inputType + '" value="' + String(value ?? "").replaceAll('"', "&quot;") + '" placeholder="' + (policy.placeholder || "") + '">';
+    }
+
+    function renderPolicies() {
+      const savedSelections = loadSelections();
+      const container = document.getElementById("policyList");
+      container.innerHTML = "";
+
+      policies.forEach((policy) => {
+        const row = document.createElement("div");
+        row.className = "policy-row";
+        const savedSelection = savedSelections[policy.key];
+        const enabled = savedSelection ? savedSelection.enabled : getDefaultEnabled(policy);
+        const customBadge = isCustomPolicy(policy.key)
+          ? '<div class="pill">Custom</div>'
+          : "";
+        const deleteAction = isCustomPolicy(policy.key)
+          ? '<div class="delete-slot"><button type="button" class="delete-btn" data-delete-key="' + policy.key.replaceAll('"', "&quot;") + '">Delete</button></div>'
+          : '<div class="delete-slot"></div>';
+
+        row.innerHTML = 
+          '<div><input type="checkbox" id="' + toggleId(policy.key) + '"' + (enabled ? " checked" : "") + "></div>" +
+          '<div><div class="policy-key">' + policy.key + '</div><div class="policy-type">' +
+          (policy.type === "list" ? "list<string>" : policy.type) + '</div>' + customBadge + '</div>' +
+          '<div>' + renderInput(policy, savedSelection) + '</div>' +
+          deleteAction;
+        container.appendChild(row);
+      });
+
+      policies.forEach((policy) => {
+        document.getElementById(toggleId(policy.key)).addEventListener("change", updateOutputs);
+        document.getElementById(inputId(policy.key)).addEventListener("input", updateOutputs);
+        document.getElementById(inputId(policy.key)).addEventListener("change", updateOutputs);
+      });
+
+      container.querySelectorAll("[data-delete-key]").forEach((button) => {
+        button.addEventListener("click", () => deleteCustomPolicy(button.dataset.deleteKey));
+      });
+
       updateOutputs();
     }
 
-    // Toggle card expand/collapse
-    function toggleCard(headerElement) {
-      const card = headerElement.closest('.output-card');
-      card.classList.toggle('collapsed');
+    function getPolicyValue(policy) {
+      const input = document.getElementById(inputId(policy.key));
+      if (policy.type === "bool") {
+        return input.checked;
+      }
+      if (policy.type === "int") {
+        const raw = input.value.trim();
+        return raw === "" ? null : Number.parseInt(raw, 10);
+      }
+      if (policy.type === "list") {
+        return input.value
+          .split("\\n")
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+      return input.value.trim();
     }
 
-    // Load custom policies from localStorage
-    function loadCustomPolicies() {
-      try {
-        const saved = localStorage.getItem('hyconnect_custom_policies');
-        if (saved) {
-          customPolicies = JSON.parse(saved);
-          console.log('Loaded custom policies from localStorage:', customPolicies);
+    function buildPolicyJson() {
+      const output = {};
+      policies.forEach((policy) => {
+        const enabled = document.getElementById(toggleId(policy.key)).checked;
+        if (!enabled) {
+          return;
         }
-      } catch (err) {
-        console.error('Failed to load custom policies:', err);
-      }
-      // Merge base and custom policies
-      POLICIES = [...BASE_POLICIES, ...customPolicies];
-      filteredPolicies = POLICIES;
-    }
-
-    // Save custom policies to localStorage
-    function saveCustomPolicies() {
-      try {
-        localStorage.setItem('hyconnect_custom_policies', JSON.stringify(customPolicies));
-        console.log('Saved custom policies to localStorage');
-      } catch (err) {
-        console.error('Failed to save custom policies:', err);
-      }
-    }
-
-    // Check if policy exists (case-insensitive)
-    function policyExists(key) {
-      const lowerKey = key.toLowerCase();
-      return POLICIES.some(p => p.key.toLowerCase() === lowerKey);
-    }
-
-    // Add custom policy with validation
-    function addCustomPolicy(key, type, value) {
-      key = key.trim();
-      type = type.toLowerCase();
-
-      // Validate input
-      if (!key) {
-        alert('Policy name cannot be empty');
-        return false;
-      }
-
-      if (!['string', 'int', 'bool'].includes(type)) {
-        alert('Type must be string, int, or bool');
-        return false;
-      }
-
-      // Check for duplicates (case-insensitive)
-      if (policyExists(key)) {
-        alert(\`Policy "\${key}" already exists (case-insensitive check)\`);
-        return false;
-      }
-
-      // Get default value based on type
-      let defaultValue;
-      if (value !== undefined && value !== '') {
-        // Use provided value with type conversion
-        if (type === 'bool') defaultValue = (value === 'true' || value === true);
-        else if (type === 'int') defaultValue = parseInt(value, 10) || 0;
-        else defaultValue = value;
-      } else {
-        // Use type-based defaults
-        if (type === 'bool') defaultValue = false;
-        else if (type === 'int') defaultValue = 0;
-        else defaultValue = '';
-      }
-
-      const newPolicy = { key, type, default: defaultValue, custom: true };
-      customPolicies.push(newPolicy);
-      POLICIES.push(newPolicy);
-      filteredPolicies = POLICIES;
-      
-      saveCustomPolicies();
-      console.log('Added custom policy:', newPolicy);
-      return true;
-    }
-
-    // Delete custom policy
-    function deleteCustomPolicy(key) {
-      const index = customPolicies.findIndex(p => p.key === key);
-      if (index !== -1) {
-        customPolicies.splice(index, 1);
-        POLICIES = [...BASE_POLICIES, ...customPolicies];
-        filteredPolicies = POLICIES;
-        delete selectedPolicies[key];
-        saveCustomPolicies();
-        savePolicies();
-        return true;
-      }
-      return false;
-    }
-
-    // Load saved policies from localStorage
-    function loadSavedPolicies() {
-      try {
-        const saved = localStorage.getItem('hyconnect_selected_policies');
-        if (saved) {
-          selectedPolicies = JSON.parse(saved);
-          console.log('Loaded saved policies from localStorage:', selectedPolicies);
+        const value = getPolicyValue(policy);
+        if (value === null) {
+          return;
         }
-      } catch (err) {
-        console.error('Failed to load saved policies:', err);
-      }
-    }
-
-    // Save policies to localStorage
-    function savePolicies() {
-      try {
-        localStorage.setItem('hyconnect_selected_policies', JSON.stringify(selectedPolicies));
-        console.log('Saved policies to localStorage');
-      } catch (err) {
-        console.error('Failed to save policies:', err);
-      }
-    }
-
-    function renderTable() {
-      const tbody = document.getElementById('policyTableBody');
-      tbody.innerHTML = '';
-      
-      filteredPolicies.forEach((policy, idx) => {
-        const isEnabled = selectedPolicies.hasOwnProperty(policy.key);
-        const row = document.createElement('tr');
-        row.className = \`\${isEnabled ? 'bg-emerald-50 border-l-4 border-emerald-500' : 'hover:bg-slate-50'} transition-all duration-150\`;
-        
-        const currentValue = selectedPolicies[policy.key] !== undefined ? selectedPolicies[policy.key] : policy.default;
-        let valueInput = '';
-        
-        if (policy.type === 'bool') {
-          valueInput = \`<select data-key="\${policy.key}" class="policy-value w-full px-2 py-1.5 border border-slate-300 rounded-md text-xs focus:ring-2 focus:ring-blue-500 \${!isEnabled ? 'opacity-50' : ''}" \${!isEnabled ? 'disabled' : ''}><option value="true" \${currentValue === true ? 'selected' : ''}>true</option><option value="false" \${currentValue === false ? 'selected' : ''}>false</option></select>\`;
-        } else if (policy.type === 'int') {
-          valueInput = \`<input type="number" data-key="\${policy.key}" class="policy-value w-full px-2 py-1.5 border border-slate-300 rounded-md text-xs focus:ring-2 focus:ring-blue-500 \${!isEnabled ? 'opacity-50' : ''}" value="\${currentValue}" \${!isEnabled ? 'disabled' : ''} />\`;
-        } else {
-          valueInput = \`<input type="text" data-key="\${policy.key}" class="policy-value w-full px-2 py-1.5 border border-slate-300 rounded-md text-xs focus:ring-2 focus:ring-blue-500 \${!isEnabled ? 'opacity-50' : ''}" value="\${currentValue}" \${!isEnabled ? 'disabled' : ''} />\`;
-        }
-        
-        const typeColors = { 'string': 'bg-blue-100 text-blue-700', 'int': 'bg-orange-100 text-orange-700', 'bool': 'bg-purple-100 text-purple-700' };
-        
-        const policyNameDisplay = policy.custom 
-          ? \`\${policy.key} <span class="ml-1 px-2 py-0.5 bg-emerald-500 text-white text-xs rounded-full">CUSTOM</span>\` 
-          : policy.key;
-
-        const deleteButton = policy.custom 
-          ? \`<button onclick="handleDeleteCustomPolicy('\${policy.key}')" class="px-2 py-1 bg-red-500 hover:bg-red-600 text-white rounded text-xs font-semibold">Delete</button>\`
-          : '';
-        
-        row.innerHTML = \`
-          <td class="px-3 py-2.5 text-center text-slate-500 font-semibold">\${idx + 1}</td>
-          <td class="px-3 py-2.5 font-medium text-slate-700">\${policyNameDisplay}</td>
-          <td class="px-3 py-2.5"><span class="inline-block px-2 py-1 rounded-md text-xs font-semibold \${typeColors[policy.type]}">\${policy.type}</span></td>
-          <td class="px-3 py-2.5">\${valueInput}</td>
-          <td class="px-3 py-2.5 text-center"><input type="checkbox" class="policy-select w-5 h-5 rounded border-slate-300 text-blue-600 cursor-pointer" data-key="\${policy.key}" \${isEnabled ? 'checked' : ''} /></td>
-          <td class="px-3 py-2.5 text-center">\${deleteButton}</td>
-        \`;
-        tbody.appendChild(row);
+        output[policy.key] = value;
       });
-      attachEvents();
-    }
-
-    function attachEvents() {
-      document.querySelectorAll('.policy-select').forEach(el => {
-        el.onchange = e => {
-          const key = e.target.dataset.key;
-          if (e.target.checked) {
-            selectedPolicies[key] = POLICIES.find(p => p.key === key).default;
-          } else {
-            delete selectedPolicies[key];
-          }
-          savePolicies();
-          renderTable();
-          updateOutputs();
-        };
-      });
-
-      document.querySelectorAll('.policy-value').forEach(el => {
-        el.onchange = e => {
-          const key = e.target.dataset.key;
-          const policy = POLICIES.find(p => p.key === key);
-          let val = e.target.value;
-          if (policy.type === 'bool') val = (val === 'true');
-          if (policy.type === 'int') val = parseInt(val || '0', 10);
-          selectedPolicies[key] = val;
-          savePolicies();
-          updateOutputs();
-        };
-      });
-
-      document.getElementById('policySearch').oninput = e => {
-        filteredPolicies = POLICIES.filter(p => p.key.toLowerCase().includes(e.target.value.toLowerCase()));
-        renderTable();
-      };
+      return output;
     }
 
     function updateOutputs() {
-      const output = Object.keys(selectedPolicies).reduce((acc, key) => {
-        acc[key] = selectedPolicies[key];
-        return acc;
-      }, {});
-
-      const jsonStr = JSON.stringify(output, null, 2);
-      document.getElementById('jsonOutput').textContent = jsonStr;
-      const base64 = btoa(JSON.stringify(output));
-      document.getElementById('base64Output').textContent = base64;
-
-      console.log('Updating policy:', output);
-
-      fetch('/updatePolicy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(output)
-      })
-      .then(r => {
-        console.log('Response status:', r.status);
-        if (!r.ok) throw new Error('Server error: ' + r.status);
-        return r.json();
-      })
-      .then(data => {
-        console.log('Encrypted data received:', data.encrypted);
-        document.getElementById('encryptedOutput').textContent = data.encrypted;
-        
-        // Display SSE response based on format toggle
-        const ssePayload = {
-          loginStatus: loggedIn,
-          policydata: streamFormat === 'encrypted' ? data.encrypted : base64
-        };
-        document.getElementById('sseResponse').textContent = JSON.stringify(ssePayload, null, 2);
-      })
-      .catch(err => {
-        console.error('Failed to update encrypted output:', err);
-        document.getElementById('encryptedOutput').textContent = 'Error: ' + err.message;
-      });
+      const policyJson = buildPolicyJson();
+      const compact = JSON.stringify(policyJson);
+      document.getElementById("jsonOutput").textContent = JSON.stringify(policyJson, null, 2);
+      document.getElementById("base64Output").textContent =
+        btoa(unescape(encodeURIComponent(compact)));
+      saveSelections();
     }
 
-    function toggle() {
-      fetch("/toggle").then(() => location.reload());
-    }
-
-    // Update value input based on selected type
-    function updateValueInputType() {
-      const typeSelect = document.getElementById('customPolicyType');
-      const container = document.getElementById('customPolicyValueContainer');
-      const type = typeSelect.value;
-
-      if (type === 'bool') {
-        container.innerHTML = \`<select id="customPolicyValue" class="px-3 py-1.5 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-full"><option value="false">false</option><option value="true">true</option></select>\`;
-      } else if (type === 'int') {
-        container.innerHTML = \`<input type="number" id="customPolicyValue" placeholder="Value (optional)" class="px-3 py-1.5 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-full"/>\`;
-      } else {
-        container.innerHTML = \`<input type="text" id="customPolicyValue" placeholder="Value (optional)" class="px-3 py-1.5 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-full"/>\`;
+    async function copyOutput(elementId, button) {
+      const text = document.getElementById(elementId).textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        const original = button.textContent;
+        button.textContent = "Copied";
+        setTimeout(() => {
+          button.textContent = original;
+        }, 1200);
+      } catch {
+        alert("Copy failed.");
       }
     }
 
-    // Handler for adding custom policy
-    function handleAddCustomPolicy() {
-      const nameInput = document.getElementById('customPolicyName');
-      const typeSelect = document.getElementById('customPolicyType');
-      const valueInput = document.getElementById('customPolicyValue');
-      
-      const name = nameInput.value.trim();
-      const type = typeSelect.value;
-      const value = valueInput.value;
-      
-      if (addCustomPolicy(name, type, value)) {
-        nameInput.value = '';
-        valueInput.value = type === 'bool' ? 'false' : '';
-        renderTable();
-        alert(\`Custom policy "\${name}" added successfully!\`);
-      }
+    function applyDefaults() {
+      localStorage.removeItem(STORAGE_KEYS.selections);
+      renderPolicies();
     }
 
-    // Handler for deleting custom policy
-    function handleDeleteCustomPolicy(key) {
-      if (confirm(\`Are you sure you want to delete custom policy "\${key}"?\`)) {
-        if (deleteCustomPolicy(key)) {
-          renderTable();
-          updateOutputs();
-          alert(\`Custom policy "\${key}" deleted successfully!\`);
+    function clearSelection() {
+      policies.forEach((policy) => {
+        const toggle = document.getElementById(toggleId(policy.key));
+        if (toggle) {
+          toggle.checked = false;
         }
-      }
-    }
-
-    // Load custom and saved policies from previous session
-    loadCustomPolicies();
-    loadSavedPolicies();
-    renderTable();
-    // Update outputs to reflect loaded policies
-    if (Object.keys(selectedPolicies).length > 0) {
+      });
       updateOutputs();
     }
 
-    // Initialize collapsible output cards (collapsed by default, click to expand)
-    document.querySelectorAll('.output-card').forEach((card, index) => {
-      // Keep first card (JSON) expanded, others collapsed
-      if (index > 0) {
-        card.classList.add('collapsed');
-      }
-    });
+    loadCustomPolicies();
+    updateCustomValueField();
+    renderPolicies();
   </script>
 </body>
-</html>`);
+</html>`;
+
+const server = http.createServer((req, res) => {
+  if (req.url !== "/") {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Not Found");
     return;
   }
 
-  // Toggle login
-  if (req.url === "/toggle") {
-    loggedIn = !loggedIn;
-    console.log("📝 Login:", loggedIn ? "LOGGED IN" : "LOGGED OUT");
-    sendPolicy();
-    res.writeHead(200);
-    res.end("Toggled");
-    return;
-  }
-
-  // Toggle stream format
-  if (req.url === "/toggleStreamFormat") {
-    streamFormat = streamFormat === "encrypted" ? "base64" : "encrypted";
-    console.log("🔄 Stream Format:", streamFormat.toUpperCase());
-    sendPolicy(); // Re-send with new format
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ format: streamFormat }));
-    return;
-  }
-
-  // Update policy from dashboard
-  if (req.url === "/updatePolicy" && req.method === "POST") {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk.toString();
-    });
-    req.on("end", () => {
-      try {
-        const json = JSON.parse(body);
-        if (json.data) {
-          // Encrypt only request from client (legacy)
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ encrypted: encryptData(json.data) }));
-          return;
-        }
-
-        // Update active policy
-        selectedPolicies = json;
-
-        // Calculate encrypted data for response to dashboard
-        const base64 = Buffer.from(JSON.stringify(selectedPolicies)).toString(
-          "base64",
-        );
-        const encrypted = encryptData(base64);
-
-        console.log("📝 Policy Updated from Dashboard");
-        sendPolicy();
-
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ success: true, encrypted: encrypted }));
-      } catch (error) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ success: false, error: error.message }));
-      }
-    });
-    return;
-  }
-
-  // SSE stream
-  if (req.url === "/streamPluginPolicy") {
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    });
-
-    clients.push(res);
-    const payload = getPolicyPayload();
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
-
-    req.on("close", () => {
-      clients = clients.filter((c) => c !== res);
-    });
-    return;
-  }
-
-  res.writeHead(404);
-  res.end();
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
 });
 
-/* ------------------ Start & Auto Open ------------------ */
-
-server.listen(PORT, () => {
-  const url = `http://localhost:${PORT}`;
-  console.log(`\n${"=".repeat(60)}`);
-  console.log("🚀 HyConnect Policy Dashboard Server");
-  console.log("=".repeat(60));
-  console.log(`📊 Dashboard: ${url}`);
-  console.log(`🔐 Encryption: AES-256-GCM`);
-  console.log(`📝 Login: ${loggedIn ? "LOGGED IN" : "LOGGED OUT"}`);
-  console.log(`${"=".repeat(60)}\n`);
-
-  const openCmd =
-    process.platform === "darwin"
-      ? `open ${url}`
-      : process.platform === "win32"
-        ? `start ${url}`
-        : `xdg-open ${url}`;
-
-  exec(openCmd);
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`Policy JSON Builder running at ${APP_URL}`);
+  openBrowser(APP_URL);
 });
